@@ -52,4 +52,4 @@ We built an *AI-driven web platform* that:
 
 ---
 
-## 📁 Folder Structure
+

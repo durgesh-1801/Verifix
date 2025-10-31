@@ -1,0 +1,384 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Invoice & PO Verification</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #f0f2f5;
+            color: #333;
+            max-width: 900px;
+            margin: 30px auto;
+            padding: 25px;
+            border-radius: 12px;
+            box-shadow: 0 6px 20px rgba(0,0,0,0.08);
+            background: linear-gradient(145deg, #ffffff, #e6e6e6);
+        }
+        h1 {
+            color: #004085;
+            text-align: center;
+            margin-bottom: 25px;
+            font-weight: 700;
+        }
+        p.subtitle {
+            text-align: center;
+            color: #666;
+            margin-bottom: 30px;
+            font-size: 1.1em;
+        }
+        .action-container {
+            background: #ffffff;
+            border-radius: 12px;
+            padding: 30px;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.07);
+            margin-bottom: 30px;
+            border: 1px solid #e0e0e0;
+        }
+        .file-input-group {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            margin-top: 20px; /* Add space for the form */
+        }
+        .file-input-group label {
+            font-weight: 600;
+            color: #004085;
+            font-size: 1.05em;
+        }
+        .file-input-group input[type="file"] {
+            padding: 10px;
+            border: 1px solid #ced4da;
+            border-radius: 6px;
+            background-color: #f8f9fa;
+        }
+        button {
+            background-color: #007bff;
+            color: white;
+            border: none;
+            padding: 14px 25px;
+            font-size: 17px;
+            font-weight: 600;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: background-color 0.3s ease, transform 0.2s ease;
+            box-shadow: 0 4px 10px rgba(0,123,255,0.3);
+            width: 100%; /* Make button full-width */
+            margin-top: 20px; /* Space above button */
+        }
+        button:hover {
+            background-color: #0056b3;
+            transform: translateY(-2px);
+        }
+        button:disabled {
+            background-color: #cccccc;
+            cursor: not-allowed;
+            box-shadow: none;
+        }
+        .gmail-button {
+            background-color: #6c757d;
+            box-shadow: 0 4px 10px rgba(108,117,125,0.3);
+            margin-top: 10px; /* Space between buttons */
+        }
+        .gmail-button:hover {
+            background-color: #5a6268;
+        }
+        hr {
+            border: 0;
+            height: 1px;
+            background: #e0e0e0;
+            margin: 30px 0;
+        }
+        #results {
+            margin-top: 30px;
+            background: #ffffff;
+            border-radius: 12px;
+            padding: 30px;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.07);
+            border: 1px solid #e0e0e0;
+        }
+        .status-banner {
+            padding: 15px 20px;
+            border-radius: 8px;
+            text-align: center;
+            font-size: 1.3em;
+            font-weight: 700;
+            margin-bottom: 20px;
+        }
+        .status-matched {
+            background-color: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+        }
+        .status-flagged {
+            background-color: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+        }
+        #discrepancies-table-container table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 15px;
+        }
+        #discrepancies-table-container th, #discrepancies-table-container td {
+            border: 1px solid #e9ecef;
+            padding: 12px;
+            text-align: left;
+        }
+        #discrepancies-table-container th {
+            background-color: #f2f2f2;
+            font-weight: 600;
+            color: #555;
+        }
+        #discrepancies-table-container td.mismatch {
+            background-color: #fff3cd; /* Light warning yellow */
+            font-weight: 600;
+            color: #856404;
+        }
+        #raw-data-toggle {
+            background-color: #6c757d;
+            box-shadow: 0 2px 5px rgba(108,117,125,0.3);
+            margin-top: 20px;
+        }
+        #raw-data-toggle:hover {
+            background-color: #5a6268;
+        }
+        pre {
+            background-color: #282c34;
+            color: #abb2bf;
+            padding: 20px;
+            border-radius: 8px;
+            overflow-x: auto;
+            white-space: pre-wrap;
+            word-wrap: break-word;
+            margin-top: 15px;
+            font-size: 0.9em;
+        }
+        .spinner {
+            border: 4px solid rgba(255,255,255,0.3);
+            border-top: 4px solid #fff;
+            border-radius: 50%;
+            width: 20px;
+            height: 20px;
+            animation: spin 1s linear infinite;
+            display: inline-block;
+            vertical-align: middle;
+            margin-right: 8px;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body>
+
+    <h1>AI-Powered Invoice & PO Verification</h1>
+    <p class="subtitle">Automate your financial document verification using FuturixAI's Shivaay LLM.</p>
+
+    <div class="action-container">
+        <h2>Manual Verification</h2>
+        <form id="verify-form">
+            <div class="file-input-group">
+                <label for="poFile">Upload Purchase Order (PO)</label>
+                <input type="file" id="poFile" name="poFile" accept=".pdf,.txt,.png,.jpg,.jpeg" required>
+            </div>
+            
+            <div class="file-input-group">
+                <label for="invoiceFile">Upload Invoice</label>
+                <input type="file" id="invoiceFile" name="invoiceFile" accept=".pdf,.txt,.png,.jpg,.jpeg" required>
+            </div>
+            
+            <button type="submit" id="submit-button">Verify Documents</button>
+        </form>
+    </div>
+
+    <div class="action-container">
+        <h2>Automated Gmail Verification</h2>
+        <p class="subtitle" style="font-size: 0.9em; margin-bottom: 20px;">
+            Click to scan your Gmail for new POs and Invoices and process them automatically.
+            (This will require Google login).
+        </p>
+        <button type="button" class="gmail-button" id="gmail-button">Scan My Gmail</button>
+    </div>
+
+
+    <div id="results" style="display:none;">
+        <h2>Verification Report</h2>
+        <div id="status-display" class="status-banner"></div>
+
+        <div id="discrepancies-table-container">
+            <h3>Discrepancies Found</h3>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Field</th>
+                        <th>Description</th>
+                        <th>PO Value</th>
+                        <th>Invoice Value</th>
+                        <th>Details</th>
+                    </tr>
+                </thead>
+                <tbody id="discrepancies-tbody">
+                    </tbody>
+            </table>
+            <p id="no-discrepancies" style="text-align: center; margin-top: 15px; font-style: italic; color: #555;">No discrepancies found. Documents match perfectly!</p>
+        </div>
+
+        <button type="button" id="raw-data-toggle">Toggle Raw AI Data</button>
+        <pre id="results-output" style="display:none;"></pre>
+    </div>
+
+    <script>
+        const form = document.getElementById('verify-form');
+        const submitButton = document.getElementById('submit-button');
+        const gmailButton = document.getElementById('gmail-button');
+        const resultsDiv = document.getElementById('results');
+        const statusDisplay = document.getElementById('status-display');
+        const discrepanciesTbody = document.getElementById('discrepancies-tbody');
+        const noDiscrepanciesPara = document.getElementById('no-discrepancies');
+        const rawDataToggle = document.getElementById('raw-data-toggle');
+        const resultsOutput = document.getElementById('results-output');
+
+        // Function to render the discrepancies table
+        function renderDiscrepancies(discrepancies) {
+            discrepanciesTbody.innerHTML = ''; // Clear previous results
+            if (discrepancies && discrepancies.length > 0) {
+                noDiscrepanciesPara.style.display = 'none';
+                document.getElementById('discrepancies-table-container').style.display = 'block';
+                discrepancies.forEach(d => {
+                    const row = discrepanciesTbody.insertRow();
+                    row.innerHTML = `
+                        <td>${d.field || 'N/A'}</td>
+                        <td>${d.description || 'N/A'}</td>
+                        <td class="mismatch">${d.po_value || 'N/A'}</td>
+                        <td class="mismatch">${d.invoice_value || 'N/A'}</td>
+                        <td>${d.details || ''}</td>
+                    `;
+                });
+            } else {
+                noDiscrepanciesPara.style.display = 'block';
+                document.getElementById('discrepancies-table-container').style.display = 'none';
+            }
+        }
+        
+        // Function to display results (used by both manual and Gmail)
+        function displayResults(data, title) {
+            if (!data) return;
+
+            // Check for general errors from the backend or AI
+            if (data.error) {
+                statusDisplay.className = 'status-banner status-flagged';
+                statusDisplay.textContent = `🚨 ${title} Error: ${data.error}`;
+                resultsOutput.textContent = JSON.stringify(data, null, 2);
+                resultsOutput.style.display = 'block';
+            } else {
+                // Handle a successful verification report
+                if (data.status) {
+                    if (data.status === 'Matched') {
+                        statusDisplay.className = 'status-banner status-matched';
+                        statusDisplay.textContent = `✅ ${title}: Documents Matched!`;
+                    } else {
+                        statusDisplay.className = 'status-banner status-flagged';
+                        statusDisplay.textContent = `🚩 ${title}: Discrepancies Found!`;
+                    }
+                    renderDiscrepancies(data.discrepancies);
+                } else {
+                    // Handle other JSON responses (like Gmail status)
+                    statusDisplay.className = 'status-banner status-matched'; // Use green for general info
+                    statusDisplay.textContent = `ℹ️ ${title} Report`;
+                    renderDiscrepancies(null); // Clear table
+                }
+                
+                // Prepare raw data for toggle
+                resultsOutput.textContent = JSON.stringify(data, null, 2);
+            }
+            resultsDiv.style.display = 'block';
+        }
+
+        // --- Event Listener for MANUAL UPLOAD FORM ---
+        form.addEventListener('submit', async (e) => {
+            e.preventDefault();
+
+            // Clear previous results and show loading state
+            submitButton.disabled = true;
+            submitButton.innerHTML = '<span class="spinner"></span> Verifying...';
+            resultsDiv.style.display = 'none';
+            statusDisplay.className = 'status-banner';
+            resultsOutput.style.display = 'none';
+            rawDataToggle.textContent = 'Toggle Raw AI Data';
+
+            const poFile = document.getElementById('poFile').files[0];
+            const invoiceFile = document.getElementById('invoiceFile').files[0];
+
+            const formData = new FormData();
+            formData.append('poFile', poFile);
+            formData.append('invoiceFile', invoiceFile);
+
+            try {
+                const response = await fetch('http://127.0.0.1:5000/verify', {
+                    method: 'POST',
+                    body: formData,
+                });
+                const data = await response.json();
+                displayResults(data, "Manual Verification");
+
+            } catch (error) {
+                console.error('Error:', error);
+                displayResults({error: `Network Error: Could not connect to backend. Is 'app.py' running? Details: ${error}`}, "Network Error");
+            } finally {
+                submitButton.disabled = false;
+                submitButton.textContent = 'Verify Documents';
+            }
+        });
+
+        // --- Event Listener for GMAIL BUTTON ---
+        gmailButton.addEventListener('click', async () => {
+            // Show loading state
+            gmailButton.disabled = true;
+            gmailButton.innerHTML = '<span class="spinner"></span> Scanning Gmail...';
+            resultsDiv.style.display = 'none';
+            statusDisplay.className = 'status-banner';
+            resultsOutput.style.display = 'none';
+            rawDataToggle.textContent = 'Toggle Raw AI Data';
+
+            try {
+                // This will redirect the user to Google if they aren't logged in.
+                // If they are logged in, it will fetch and display results.
+                
+                // We use window.location.href to initiate the OAuth flow
+                // The backend will redirect back to this page after
+                window.location.href = 'http://127.0.0.1:5000/check_gmail';
+                
+                // Note: The code below might not run if a redirect happens
+                // The results will be shown when the user is redirected *back*
+                
+            } catch (error) {
+                console.error('Error:', error);
+                displayResults({error: `Network Error: Could not connect to backend. Is 'app.py' running? Details: ${error}`}, "Network Error");
+                gmailButton.disabled = false;
+                gmailButton.textContent = 'Scan My Gmail';
+            }
+            
+            // We set a small timeout to re-enable the button in case the redirect
+            // doesn't happen (e.g., popup blocker)
+            setTimeout(() => {
+                 gmailButton.disabled = false;
+                 gmailButton.textContent = 'Scan My Gmail';
+            }, 3000);
+        });
+
+        // Toggle raw data display
+        rawDataToggle.addEventListener('click', () => {
+            resultsOutput.style.display = resultsOutput.style.display === 'none' ? 'block' : 'none';
+        });
+
+        // Also update file input `accept` attribute to suggest relevant files
+        document.getElementById('poFile').setAttribute('accept', '.pdf,.txt,.png,.jpg,.jpeg');
+        document.getElementById('invoiceFile').setAttribute('accept', '.pdf,.txt,.png,.jpg,.jpeg');
+    </script>
+
+</body>
+</html>

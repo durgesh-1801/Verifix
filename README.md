@@ -84,3 +84,12 @@ To develop an **AI-powered tool** that automatically extracts and reconciles dat
 - `Google API Python Client` — for Gmail automation  
 - `Bootstrap` — for responsive and modern UI  
 - `Jinja2` — for rendering dynamic templates in Flask
+```
+## 👨‍💻 Team Members
+
+- **Durgesh Sharma** — Backend & Integration  
+- **Mantra Singh** — Frontend & UI  
+- **Navya Sharma** — API Handling & Automation  
+- **Snehreet Kaur** — Research & Documentation
+
+

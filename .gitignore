@@ -1,0 +1,83 @@
+# ================================
+# Python and Flask Project Ignore
+# ================================
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual Environment folders
+venv/
+env/
+.venv/
+
+# Flask instance folder
+instance/
+
+# Logs and debug files
+*.log
+*.out
+*.err
+
+# Operating system files
+.DS_Store
+Thumbs.db
+
+# ===================================
+# IDE / Editor Config Files
+# ===================================
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# ===================================
+# Build and distribution folders
+# ===================================
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# ===================================
+# Sensitive Files and API Keys
+# ===================================
+client_secret.json
+token.pickle
+.env
+*.json
+*.key
+*.pem
+
+# ===================================
+# Project-specific exclusions
+# ===================================
+
+
+
+# Uploaded or temporary files
+uploads/
+*.tmp
+*.bak
+
+# Cache and test folders
+.cache/
+__pycache__/
+tests/__pycache__/
+
+# ===================================
+# Node/Frontend related
+# ===================================
+node_modules/
+package-lock.json
+npm-debug.log
+
+# ===================================
+# Reports / Documentation
+# ===================================
+*.pdf
+*.docx
+*.pptx
+*.xlsx
+*.zip

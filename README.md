@@ -77,3 +77,10 @@ To develop an **AI-powered tool** that automatically extracts and reconciles dat
 |  Result Rendered in UI   |
 |  + Gmail Automation Tab  |
 +--------------------------+
+---
+**Additional Tools & Libraries:**
+- `Flask-CORS` — to enable cross-origin requests between frontend and backend  
+- `Requests` — for making API calls to Shivaay LLM  
+- `Google API Python Client` — for Gmail automation  
+- `Bootstrap` — for responsive and modern UI  
+- `Jinja2` — for rendering dynamic templates in Flask

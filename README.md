@@ -1,5 +1,5 @@
-# 🧾 AI-Powered Invoice & Purchase Order Verification System  
-### Built for FuturixAI Hackathon | Theme: FinTech  
+# 🧾 Verifix (AI-Powered Invoice & Purchase Order Verification System) 
+### Built for MUJ HACKX 3.0 | Theme: FinTech  
 #### By Team **Quantum Crew**
 
 ---

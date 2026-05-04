@@ -28,7 +28,7 @@ from googleapiclient.discovery import build
 # ⚙️ Directly set your Shivaay LLM API credentials here for demo use.
 # (No need to run setx/export commands)
 
-FUTURIXAI_API_KEY = "6903664e3bb9326d46566470"   # <-- your API key
+FUTURIXAI_API_KEY = ""   # <-- your API key
 FUTURIXAI_API_BASE = "https://api.futurixai.com/api/shivaay/v1"  # <-- your API endpoint
 
 print("✅ Using hardcoded API key and base URL for Shivaay API.")

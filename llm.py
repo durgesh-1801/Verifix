@@ -37,37 +37,47 @@ _SYSTEM = (
     "If a value is not readable in the text, say 'unreadable'."
 )
 
-_USER_TEMPLATE = """Below are two documents. Read them carefully.
+_USER_TEMPLATE = """
+Compare the following Invoice and Purchase Order.
 
-=== INVOICE (verbatim extracted text) ===
+STRICT RULES:
+- ONLY return mismatches
+- If everything matches, return an EMPTY list []
+- DO NOT return matches
+- DO NOT explain correct values
+- DO NOT create fields like tax, total, other
+
+ONLY check:
+1. price mismatch
+2. quantity mismatch
+3. missing items
+
+Rules:
+- If item exists in both -> compare price and quantity ONLY
+- If item exists in PO but not in Invoice -> "missing_in_invoice"
+- If item exists in Invoice but not in PO -> "missing_in_po"
+- DO NOT duplicate entries
+- DO NOT hallucinate fields
+
+Invoice:
 {invoice_text}
 
-=== PURCHASE ORDER (verbatim extracted text) ===
+PO:
 {po_text}
 
-Your task:
-1. Identify every line item in the Invoice and the matching line item in the PO.
-2. Compare: unit price, quantity, total, tax, and any terms.
-3. Note items present in one document but missing in the other.
-4. Use the EXACT item names/descriptions as they appear in the text above.
-
-Respond with ONLY a JSON object — no markdown fences, no explanation:
+Return STRICT JSON:
 
 {{
   "discrepancies": [
     {{
-      "item": "<exact item name from document>",
-      "field": "<price | quantity | total | tax | missing_in_invoice | missing_in_po | other>",
-      "invoice_value": "<value as written in Invoice, or 'N/A'>",
-      "po_value": "<value as written in PO, or 'N/A'>",
-      "issue": "<one-sentence plain-English description>"
+      "item": "",
+      "field": "",
+      "invoice_value": "",
+      "po_value": "",
+      "issue": ""
     }}
-  ],
-  "summary": "<2-3 sentence overall summary of match quality>"
+  ]
 }}
-
-If the documents match perfectly, return:
-{{ "discrepancies": [], "summary": "Invoice and PO match on all compared fields." }}
 """
 
 
@@ -96,6 +106,22 @@ def _safe_parse(raw: str) -> dict:
     if not isinstance(parsed, dict):
         raise ValueError(f"Expected JSON object, got {type(parsed)}")
     return parsed
+
+
+def normalize_field(field):
+    if not field:
+        return "missing_in_invoice"
+
+    field = field.lower().strip()
+
+    if field in ["qty", "quantity"]:
+        return "quantity"
+    if field in ["price", "rate"]:
+        return "price"
+    if "missing" in field:
+        return field
+
+    return field
 
 
 # ---------------------------------------------------------------------------
@@ -136,7 +162,7 @@ def compare_invoice_po(invoice_text: str, po_text: str) -> dict:
         return {"discrepancies": [], "summary": "", "error": "Missing GROQ_API_KEY env var."}
 
     # --- Build request ---
-    user_prompt = _USER_TEMPLATE.format(
+    prompt = _USER_TEMPLATE.format(
         invoice_text=invoice_text.strip(),
         po_text=po_text.strip(),
     )
@@ -146,7 +172,7 @@ def compare_invoice_po(invoice_text: str, po_text: str) -> dict:
         "temperature": 0,
         "messages": [
             {"role": "system", "content": _SYSTEM},
-            {"role": "user", "content": user_prompt},
+            {"role": "user", "content": prompt},
         ],
     }
 
@@ -183,8 +209,39 @@ def compare_invoice_po(invoice_text: str, po_text: str) -> dict:
     if not isinstance(discrepancies, list):
         discrepancies = []
 
-    return {
-        "discrepancies": discrepancies,
-        "summary": parsed.get("summary", ""),
-        "error": None,
-    }
+    valid_fields = {"price", "quantity", "missing_in_invoice", "missing_in_po"}
+
+    cleaned = []
+    seen = set()
+
+    for d in discrepancies:
+        if not isinstance(d, dict):
+            continue
+
+        item = d.get("item")
+        field = normalize_field(d.get("field"))
+
+        # Skip empty item
+        if not item:
+            continue
+
+        # Skip invalid fields
+        if field not in valid_fields:
+            continue
+
+        # Skip wrong mismatch rows where values are identical
+        if d.get("invoice_value") == d.get("po_value"):
+            continue
+
+        # Fix field in object
+        d["field"] = field
+
+        # Remove duplicates
+        key = (item, field)
+        if key in seen:
+            continue
+        seen.add(key)
+
+        cleaned.append(d)
+
+    return {"discrepancies": cleaned}

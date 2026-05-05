@@ -14,6 +14,7 @@ import os
 import pickle
 
 from dotenv import load_dotenv
+import fitz
 
 load_dotenv()
 
@@ -30,7 +31,6 @@ from google.auth.transport.requests import Request
 from google_auth_oauthlib.flow import Flow
 
 from llm import compare_invoice_po
-from ocr import extract_text_from_pdf
 
 
 os.environ["OAUTHLIB_INSECURE_TRANSPORT"] = "1"
@@ -93,36 +93,78 @@ def _read_upload(field_name: str) -> tuple[bytes, str] | tuple[None, None]:
     return data, f.filename
 
 
+def _ui_status(result: dict) -> str:
+    if result.get("error"):
+        return "Error"
+    if result.get("discrepancies"):
+        return "Discrepancies Found"
+    return "Matched ✅"
+
+
+def extract_text_from_pdf(file_bytes):
+    text = ""
+    try:
+        doc = fitz.open(stream=file_bytes, filetype="pdf")
+        for page in doc:
+            text += page.get_text()
+        doc.close()
+    except Exception as e:
+        print("PyMuPDF extraction failed:", str(e))
+        return ""
+
+    print("===== OCR DEBUG =====")
+    print("TEXT LENGTH:", len(text))
+    print("TEXT SAMPLE:", text[:500])
+    if len(text.strip()) < 50:
+        print("⚠️ Weak extraction detected")
+
+    return text.strip()
+
+
+def _json_error_payload(invoice_text: str, po_text: str):
+    return jsonify({
+        "error": "OCR failed — extracted text too small",
+        "invoice_length": len(invoice_text),
+        "po_length": len(po_text)
+    })
+
+
 def _run_pipeline(invoice_bytes: bytes, invoice_name: str,
                   po_bytes: bytes, po_name: str) -> dict:
     """
-    Full pipeline: extract text → call LLM → return structured result.
+    Full pipeline: extract text -> call LLM -> return structured result.
     Logs every stage so you can see exactly where data breaks.
     """
-    # Stage 1: text extraction
-    invoice_text = _extract_text(invoice_bytes, invoice_name)
-    po_text = _extract_text(po_bytes, po_name)
+    try:
+        invoice_text = _extract_text(invoice_bytes, invoice_name)
+        po_text = _extract_text(po_bytes, po_name)
+    except Exception as exc:
+        return {
+            "invoice_text": "",
+            "po_text": "",
+            "discrepancies": [],
+            "summary": "",
+            "error": str(exc),
+            "raw_response": {},
+        }
 
-    logger.info(
-        "PIPELINE STAGE 1 — Extraction: invoice=%d chars, po=%d chars",
-        len(invoice_text), len(po_text),
-    )
-    # ── DEBUG: print first 300 chars of each so you can verify OCR quality ──
-    logger.debug("INVOICE TEXT PREVIEW:\n%s", invoice_text[:300])
-    logger.debug("PO TEXT PREVIEW:\n%s", po_text[:300])
+    if len(invoice_text.strip()) < 50 or len(po_text.strip()) < 50:
+        return {
+            "invoice_text": invoice_text,
+            "po_text": po_text,
+            "discrepancies": [],
+            "summary": "",
+            "error": "OCR failed — extracted text too small",
+            "raw_response": {},
+        }
 
-    if not invoice_text.strip():
-        return {"discrepancies": [], "summary": "", "error": "Invoice text is empty after extraction."}
-    if not po_text.strip():
-        return {"discrepancies": [], "summary": "", "error": "PO text is empty after extraction."}
+    print("===== SENDING TO LLM =====")
+    print("Invoice length:", len(invoice_text))
+    print("PO length:", len(po_text))
 
-    # Stage 2: LLM comparison
     comparison = compare_invoice_po(invoice_text, po_text)
-    logger.info(
-        "PIPELINE STAGE 2 — LLM: %d discrepancy(ies), error=%s",
-        len(comparison.get("discrepancies", [])),
-        comparison.get("error"),
-    )
+    print("===== RAW LLM RESPONSE =====")
+    print(comparison)
 
     return {
         "invoice_text": invoice_text,
@@ -130,15 +172,8 @@ def _run_pipeline(invoice_bytes: bytes, invoice_name: str,
         "discrepancies": comparison.get("discrepancies", []),
         "summary": comparison.get("summary", ""),
         "error": comparison.get("error"),
+        "raw_response": comparison,
     }
-
-
-def _ui_status(result: dict) -> str:
-    if result.get("error"):
-        return "Error"
-    if result.get("discrepancies"):
-        return "Discrepancies Found"
-    return "Matched ✅"
 
 
 # ---------------------------------------------------------------------------
@@ -157,26 +192,50 @@ def upload_page():
 
 @app.route("/verify", methods=["POST"])
 def verify_route():
-    invoice_bytes, invoice_name = _read_upload("invoiceFile")
-    po_bytes, po_name = _read_upload("poFile")
+    invoice_file = request.files.get("invoiceFile")
+    po_file = request.files.get("poFile")
 
-    if invoice_bytes is None:
-        return render_template("upload.html", result_json={"error": "Missing or invalid invoice file."}, status="Error")
-    if po_bytes is None:
-        return render_template("upload.html", result_json={"error": "Missing or invalid PO file."}, status="Error")
+    if not invoice_file or not getattr(invoice_file, "filename", None):
+        result = {"error": "Missing invoice file.", "discrepancies": []}
+    elif not po_file or not getattr(po_file, "filename", None):
+        result = {"error": "Missing PO file.", "discrepancies": []}
+    else:
+        invoice_text = extract_text_from_pdf(invoice_file.read())
+        po_text = extract_text_from_pdf(po_file.read())
+        print("===== DEBUG OCR OUTPUT =====")
+        print("INVOICE TEXT LENGTH:", len(invoice_text))
+        print("PO TEXT LENGTH:", len(po_text))
+        print("INVOICE TEXT SAMPLE:", invoice_text[:500])
+        print("PO TEXT SAMPLE:", po_text[:500])
 
-    result = _run_pipeline(invoice_bytes, invoice_name, po_bytes, po_name)
-    status = _ui_status(result)
+        if len(invoice_text.strip()) < 50 or len(po_text.strip()) < 50:
+            return _json_error_payload(invoice_text, po_text)
 
-    report = {
-        "status": status,
-        "discrepancies": result["discrepancies"],
-        "summary": result.get("summary", ""),
-    }
+        print("===== SENDING TO LLM =====")
+        print("Invoice length:", len(invoice_text))
+        print("PO length:", len(po_text))
+        result = compare_invoice_po(invoice_text, po_text)
+        print("===== RAW LLM RESPONSE =====")
+        print(result)
+
     if result.get("error"):
-        report["error"] = result["error"]
+        status = "Error"
+    elif "discrepancies" in result:
+        if len(result["discrepancies"]) > 0:
+            status = "Discrepancies Found"
+        else:
+            status = "Matched ✅"
+    else:
+        status = "Error"
 
-    return render_template("upload.html", result_json=report, status=status)
+    print("RESULT:", result)
+    print("STATUS:", status)
+
+    return render_template(
+        "upload.html",
+        result=result,
+        status=status
+    )
 
 
 @app.route("/api/verify-invoice", methods=["POST"])

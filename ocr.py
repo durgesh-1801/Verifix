@@ -113,4 +113,4 @@ def extract_text_from_pdf(file_bytes: bytes) -> str:
         logger.error("OCR unexpected failure: %s", exc)
         return direct
 
-    return ocr_text if ocr_text else direct
+    return ocr_text if ocr_text else directpp

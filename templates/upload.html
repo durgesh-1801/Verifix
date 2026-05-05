@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Upload | AI Invoice & PO Verification</title>
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+
   <style>
     body {
       background-color: #f4f6fa;
@@ -42,7 +43,6 @@
       background-color: #004aad;
       border: none;
       border-radius: 10px;
-      transition: 0.3s;
     }
 
     .btn-primary:hover {
@@ -56,31 +56,15 @@
       text-align: center;
     }
 
-    pre {
-      background: #1e293b;
-      color: #e5e7eb;
-      border-radius: 12px;
-      padding: 20px;
-      overflow-x: auto;
-      font-size: 14px;
+    .discrepancy-row {
+      background-color: #ffe6e6;
     }
 
-    .gmail-section {
-      margin-top: 25px;
-    }
-
-    .gmail-button {
-      background-color: #6c757d;
-      color: #fff;
-      border: none;
-      border-radius: 10px;
-      padding: 10px 20px;
+    .no-discrepancies {
+      color: #198754;
       font-weight: 600;
-      transition: 0.3s;
-    }
-
-    .gmail-button:hover {
-      background-color: #495057;
+      text-align: center;
+      margin-top: 10px;
     }
 
     footer {
@@ -97,48 +81,50 @@
       text-decoration: none;
       color: #004aad;
       font-weight: 600;
-      transition: 0.2s;
     }
 
     .back-btn:hover {
-      color: #002f6c;
       text-decoration: underline;
     }
   </style>
 </head>
+
 <body>
   <div class="container position-relative">
     <a href="/" class="back-btn">⬅ Back to Home</a>
 
     <h1>Verification Report</h1>
 
-    <!-- ✅ Alert logic for different statuses -->
+    {% set discrepancies = result.discrepancies if result and result.discrepancies is defined else [] %}
+
+    <!-- ✅ ALERTS (FIXED LOGIC) -->
     {% if status == "Matched ✅" %}
       <div class="alert alert-success">
         ✅ AI Verification Successful — No Discrepancies Found!
       </div>
-    {% elif status == "Pending" %}
-      <!-- First load: no alert -->
+
     {% elif status == "Error" %}
       <div class="alert alert-warning">
-        ⚠️ AI API call failed. Using mock data for demonstration.
+        ⚠️ AI API call failed. Check API key / quota.
       </div>
-    {% else %}
+
+    {% elif discrepancies|length > 0 %}
       <div class="alert alert-danger">
-        ⚠️ Manual Verification — Discrepancies Found!
+        ⚠️ Discrepancies Found!
       </div>
     {% endif %}
 
-    <!-- 📁 File Upload Form -->
-    <form id="uploadForm" action="/verify" method="post" enctype="multipart/form-data" class="mb-4">
+
+    <!-- 📁 Upload Form -->
+    <form action="/verify" method="post" enctype="multipart/form-data" class="mb-4">
       <div class="mb-3">
-        <label for="invoiceFile" class="form-label">Upload Invoice File</label>
-        <input type="file" class="form-control" id="invoiceFile" name="invoiceFile" required>
+        <label class="form-label">Upload Invoice File</label>
+        <input type="file" class="form-control" name="invoiceFile" required>
       </div>
 
       <div class="mb-3">
-        <label for="poFile" class="form-label">Upload Purchase Order File</label>
-        <input type="file" class="form-control" id="poFile" name="poFile" required>
+        <label class="form-label">Upload Purchase Order File</label>
+        <input type="file" class="form-control" name="poFile" required>
       </div>
 
       <div class="text-center">
@@ -146,22 +132,53 @@
       </div>
     </form>
 
-    <!-- 🧠 Toggle for raw JSON -->
-    <div class="text-center mb-3">
-      <button class="btn btn-secondary" onclick="toggleRaw()">Toggle Raw AI Data</button>
-    </div>
 
-    <div id="rawData" style="display: none;">
-      <pre>{{ result_json | tojson(indent=2) }}</pre>
-    </div>
+    <!-- 🔴 DISCREPANCY TABLE -->
+    {% if discrepancies|length > 0 %}
+      <div class="table-responsive mb-4">
+        <p><strong>Total Issues:</strong> {{ discrepancies|length }}</p>
 
-    <!-- 📧 Gmail Integration -->
-    <details class="gmail-section">
-      <summary style="cursor: pointer; font-weight: 600; color: #004aad;">Automated Gmail Verification</summary>
-      <p style="font-size: 0.9em; margin-top: 10px;">
-        Click below to scan your Gmail inbox for Purchase Orders and Invoices.
-      </p>
-      <button type="button" class="gmail-button" id="gmail-button">Scan My Gmail</button>
+        <table class="table table-bordered align-middle">
+          <thead class="table-light">
+            <tr>
+              <th>Item</th>
+              <th>Field</th>
+              <th>Invoice</th>
+              <th>PO</th>
+              <th>Issue</th>
+            </tr>
+          </thead>
+
+          <tbody>
+            {% for d in discrepancies %}
+              <tr class="discrepancy-row">
+                <td>{{ d.item or "-" }}</td>
+                <td>{{ d.field or "-" }}</td>
+                <td>{{ d.invoice_value or "-" }}</td>
+                <td>{{ d.po_value or "-" }}</td>
+                <td>{{ d.issue or "-" }}</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+
+
+    <!-- 🟢 SUCCESS STATE -->
+    {% elif status == "Matched ✅" %}
+      <p class="no-discrepancies">✅ No discrepancies found</p>
+    {% endif %}
+
+
+    <!-- 📧 Gmail Section -->
+    <details style="margin-top:20px;">
+      <summary style="cursor:pointer; font-weight:600; color:#004aad;">
+        Automated Gmail Verification
+      </summary>
+
+      <button type="button" class="btn btn-secondary mt-2" id="gmail-button">
+        Scan My Gmail
+      </button>
     </details>
 
     <footer>
@@ -169,27 +186,25 @@
     </footer>
   </div>
 
-  <script>
-    function toggleRaw() {
-      const raw = document.getElementById("rawData");
-      raw.style.display = raw.style.display === "none" ? "block" : "none";
-    }
 
+  <script>
     document.getElementById("gmail-button")?.addEventListener("click", async () => {
       const btn = document.getElementById("gmail-button");
       btn.disabled = true;
-      btn.textContent = "⏳ Scanning Gmail...";
+      btn.textContent = "⏳ Scanning...";
+
       try {
         const res = await fetch("/check_gmail");
         const data = await res.json();
-        alert("✅ Gmail Scan Complete: " + JSON.stringify(data, null, 2));
-      } catch (err) {
-        alert("❌ Error scanning Gmail. Please ensure backend is running.");
+        alert("✅ Gmail Scan Complete");
+      } catch {
+        alert("❌ Error scanning Gmail");
       } finally {
         btn.disabled = false;
         btn.textContent = "Scan My Gmail";
       }
     });
   </script>
+
 </body>
 </html>

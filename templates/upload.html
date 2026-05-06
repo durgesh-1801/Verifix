@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Upload | AI Invoice & PO Verification</title>
+  <title>Invoice AI</title>
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
 
   <style>
@@ -93,9 +93,15 @@
   <div class="container position-relative">
     <a href="/" class="back-btn">⬅ Back to Home</a>
 
-    <h1>Verification Report</h1>
+    <h1>Invoice AI Verification Report</h1>
 
-    {% set discrepancies = result.discrepancies if result and result.discrepancies is defined else [] %}
+    {% set discrepancies = result.discrepancies if result and result.discrepancies else [] %}
+
+    {% if error %}
+    <div class="alert alert-warning">
+      {{ error }}
+    </div>
+    {% endif %}
 
     <!-- ✅ ALERTS (FIXED LOGIC) -->
     {% if status == "Matched ✅" %}
@@ -103,7 +109,7 @@
         ✅ AI Verification Successful — No Discrepancies Found!
       </div>
 
-    {% elif status == "Error" %}
+    {% elif status == "Error" and not error %}
       <div class="alert alert-warning">
         ⚠️ AI API call failed. Check API key / quota.
       </div>
@@ -128,16 +134,25 @@
       </div>
 
       <div class="text-center">
-        <button type="submit" class="btn btn-primary px-5">🔍 Verify</button>
+        <button type="submit" id="verify-btn" class="btn btn-primary px-5">
+          🔍 Verify
+        </button>
       </div>
     </form>
 
+    <div style="margin-bottom:20px;">
+      <strong>Status:</strong> {{ status }} <br>
+      <strong>Total Issues:</strong> {{ discrepancies|length }}
+    </div>
 
     <!-- 🔴 DISCREPANCY TABLE -->
     {% if discrepancies|length > 0 %}
-      <div class="table-responsive mb-4">
-        <p><strong>Total Issues:</strong> {{ discrepancies|length }}</p>
+      <div style="margin-bottom:10px;">
+        <strong>Total Rupee Difference:</strong>
+        ₹{{ total_difference }}
+      </div>
 
+      <div class="table-responsive mb-4">
         <table class="table table-bordered align-middle">
           <thead class="table-light">
             <tr>
@@ -145,6 +160,7 @@
               <th>Field</th>
               <th>Invoice</th>
               <th>PO</th>
+              <th>Difference (₹)</th>
               <th>Issue</th>
             </tr>
           </thead>
@@ -153,15 +169,27 @@
             {% for d in discrepancies %}
               <tr class="discrepancy-row">
                 <td>{{ d.item or "-" }}</td>
-                <td>{{ d.field or "-" }}</td>
-                <td>{{ d.invoice_value or "-" }}</td>
+                <td>{{ (d.field or "-").replace("_", " ") }}</td>
+                <td>{{ d.invoice_value if d.invoice_value not in ["unreadable", "", None] else "N/A" }}</td>
                 <td>{{ d.po_value or "-" }}</td>
-                <td>{{ d.issue or "-" }}</td>
+                <td>{{ d.difference }}</td>
+                <td>{{ (d.issue or "-").replace("_", " ") }}</td>
               </tr>
             {% endfor %}
           </tbody>
         </table>
       </div>
+
+      <form action="/export-pdf" method="POST">
+        <input type="hidden" name="status" value="{{ status }}">
+        <input type="hidden" name="total_issues" value="{{ discrepancies|length }}">
+        <input type="hidden" name="total_difference" value="{{ total_difference }}">
+        <input type="hidden" name="discrepancies_json" value='{{ discrepancies | tojson | safe }}'>
+
+        <button type="submit" class="btn btn-primary mt-3">
+          Download PDF Report
+        </button>
+      </form>
 
 
     <!-- 🟢 SUCCESS STATE -->
@@ -181,9 +209,9 @@
       </button>
     </details>
 
-    <footer>
-      <p>Powered by <strong>Shivaay LLM</strong> • Team FuturixAI</p>
-    </footer>
+    <div style="text-align:center; margin-top:40px; color:#666;">
+      © 2026 Reconix
+    </div>
   </div>
 
 
@@ -203,6 +231,17 @@
         btn.disabled = false;
         btn.textContent = "Scan My Gmail";
       }
+    });
+  </script>
+  <script>
+    document.querySelector("form").addEventListener("submit", function () {
+        const btn = document.getElementById("verify-btn");
+
+        btn.disabled = true;
+        btn.innerHTML = `
+          <span class="spinner-border spinner-border-sm"></span>
+          Analysing your documents with AI...
+        `;
     });
   </script>
 

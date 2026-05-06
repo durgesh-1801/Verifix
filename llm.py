@@ -124,6 +124,44 @@ def normalize_field(field):
     return field
 
 
+def normalize_issues(discrepancies):
+    fixed = []
+
+    for d in discrepancies:
+        item = d.get("item")
+        field = d.get("field", "").lower()
+        inv = d.get("invoice_value")
+        po = d.get("po_value")
+        issue = d.get("issue", "").lower()
+
+        # Fix wrong "missing" when both values exist
+        if inv not in [None, "", "unreadable"] and po not in [None, "", "unreadable"]:
+            if inv != po:
+                if "qty" in field or "quantity" in field:
+                    issue = "quantity mismatch"
+                elif "price" in field:
+                    issue = "price mismatch"
+
+        # Fix actual missing
+        elif inv in [None, "", "unreadable"] and po not in [None, "", "unreadable"]:
+            issue = "missing_in_invoice"
+        elif po in [None, "", "unreadable"] and inv not in [None, "", "unreadable"]:
+            issue = "missing_in_po"
+
+        d["issue"] = issue
+        fixed.append(d)
+
+    return fixed
+
+
+def safe_number(value):
+    try:
+        value = str(value).replace(",", "").replace("₹", "").strip()
+        return float(value)
+    except Exception:
+        return None
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -162,10 +200,59 @@ def compare_invoice_po(invoice_text: str, po_text: str) -> dict:
         return {"discrepancies": [], "summary": "", "error": "Missing GROQ_API_KEY env var."}
 
     # --- Build request ---
-    prompt = _USER_TEMPLATE.format(
-        invoice_text=invoice_text.strip(),
-        po_text=po_text.strip(),
-    )
+    prompt = f"""
+You are an expert invoice auditor.
+
+Compare the Invoice and Purchase Order carefully.
+
+STRICT RULES (DO NOT VIOLATE):
+
+1. If an item exists in BOTH documents:
+   - If quantity differs → issue = "quantity mismatch"
+   - If price differs → issue = "price mismatch"
+   - DO NOT mark it as missing
+
+2. If item exists ONLY in Invoice:
+   → issue = "missing_in_po"
+
+3. If item exists ONLY in PO:
+   → issue = "missing_in_invoice"
+
+4. NEVER confuse mismatch with missing
+
+5. Use EXACT item names from text
+
+6. If a value is not readable:
+   → use "unreadable"
+
+7. Output ONLY valid JSON
+   - No explanation
+   - No markdown
+   - No extra text
+
+FORMAT:
+{{
+  "discrepancies": [
+    {{
+      "item": "...",
+      "field": "...",
+      "invoice_value": "...",
+      "po_value": "...",
+      "issue": "..."
+    }}
+  ]
+}}
+
+---
+
+INVOICE:
+{invoice_text}
+
+---
+
+PO:
+{po_text}
+"""
 
     payload = {
         "model": _MODEL,
@@ -208,40 +295,81 @@ def compare_invoice_po(invoice_text: str, po_text: str) -> dict:
     discrepancies = parsed.get("discrepancies", [])
     if not isinstance(discrepancies, list):
         discrepancies = []
-
-    valid_fields = {"price", "quantity", "missing_in_invoice", "missing_in_po"}
+    parsed["discrepancies"] = normalize_issues(discrepancies)
 
     cleaned = []
     seen = set()
 
-    for d in discrepancies:
+    for d in parsed["discrepancies"]:
         if not isinstance(d, dict):
             continue
 
         item = d.get("item")
-        field = normalize_field(d.get("field"))
+        field = str(d.get("field", "")).lower().strip()
+        inv = str(d.get("invoice_value", "")).strip()
+        po = str(d.get("po_value", "")).strip()
+        issue = d.get("issue", "")
+        issue_text = str(issue).lower().strip()
+        inv_clean = str(inv).strip()
+        po_clean = str(po).strip()
 
         # Skip empty item
         if not item:
             continue
 
-        # Skip invalid fields
-        if field not in valid_fields:
+        # Remove fake/no-issue rows
+        if any(word in issue_text for word in ["no issue", "matched", "same", "identical", "correct"]):
             continue
 
-        # Skip wrong mismatch rows where values are identical
-        if d.get("invoice_value") == d.get("po_value"):
-            continue
+        # Normalize fields
+        if field in ["qty", "quantity"]:
+            field = "quantity"
+        elif field in ["price", "rate"]:
+            field = "price"
 
-        # Fix field in object
         d["field"] = field
 
+        # Normalize missing values
+        if inv.lower() in ["unreadable", "", "none"]:
+            d["invoice_value"] = "N/A"
+
+        if po.lower() in ["unreadable", "", "none"]:
+            d["po_value"] = "N/A"
+
+        # Deterministic rupee difference (computed in Python, never by LLM)
+        inv_num = safe_number(inv)
+        po_num = safe_number(po)
+
+        if inv_num is not None and po_num is not None:
+            diff = abs(inv_num - po_num)
+
+            # Remove decimal if whole number
+            if diff.is_integer():
+                diff = int(diff)
+
+            d["difference"] = str(diff)
+        else:
+            d["difference"] = "N/A"
+
+        # Remove rows where values are identical and difference is zero
+        if inv_clean == po_clean and d["difference"] == "0":
+            continue
+
+        # Remove false "missing" rows when values are actually equal
+        if "missing" in issue_text and inv_clean == po_clean:
+            continue
+
+        # Keep previous identical-value filter for non-missing issues
+        if inv_clean == po_clean and "missing" not in issue_text:
+            continue
+
         # Remove duplicates
-        key = (item, field)
+        key = (item, field, d.get("invoice_value"), d.get("po_value"))
         if key in seen:
             continue
         seen.add(key)
 
         cleaned.append(d)
 
-    return {"discrepancies": cleaned}
+    parsed["discrepancies"] = cleaned
+    return parsed

@@ -11,3 +11,4 @@ Pillow==11.0.0
 pypdfium2==4.30.0
 gunicorn==23.0.0
 PyMuPDF==1.26.0
+reportlab==4.5.0

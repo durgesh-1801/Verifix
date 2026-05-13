@@ -17,7 +17,6 @@ import pickle
 from datetime import datetime
 
 from dotenv import load_dotenv
-import fitz
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import getSampleStyleSheet
@@ -38,6 +37,8 @@ from google.auth.transport.requests import Request
 from google_auth_oauthlib.flow import Flow
 
 from llm import compare_invoice_po
+from ocr import extract_text_from_pdf
+from parser import build_structured_document
 
 
 os.environ["OAUTHLIB_INSECURE_TRANSPORT"] = "1"
@@ -79,6 +80,21 @@ def _extract_text(file_bytes: bytes, filename: str) -> str:
     return ""
 
 
+def _prepare_llm_text(raw_text: str) -> str:
+    """Preserve raw text, but prepend structured line items when parsing succeeds."""
+    structured = build_structured_document(raw_text)
+    if not structured.get("parse_success"):
+        return raw_text
+
+    structured_block = (
+        "STRUCTURED_LINE_ITEMS_JSON:\n"
+        f"{structured['structured_json']}\n\n"
+        "RAW_DOCUMENT_TEXT:\n"
+        f"{raw_text}"
+    )
+    return structured_block
+
+
 def _read_upload(field_name: str) -> tuple[bytes, str] | tuple[None, None]:
     """Read bytes + filename from a multipart field. Returns (None, None) on failure."""
     f = request.files.get(field_name)
@@ -106,26 +122,6 @@ def _ui_status(result: dict) -> str:
     if result.get("discrepancies"):
         return "Discrepancies Found"
     return "Matched ✅"
-
-
-def extract_text_from_pdf(file_bytes):
-    text = ""
-    try:
-        doc = fitz.open(stream=file_bytes, filetype="pdf")
-        for page in doc:
-            text += page.get_text()
-        doc.close()
-    except Exception as e:
-        print("PyMuPDF extraction failed:", str(e))
-        return ""
-
-    print("===== OCR DEBUG =====")
-    print("TEXT LENGTH:", len(text))
-    print("TEXT SAMPLE:", text[:500])
-    if len(text.strip()) < 50:
-        print("⚠️ Weak extraction detected")
-
-    return text.strip()
 
 
 def _json_error_payload(invoice_text: str, po_text: str):
@@ -169,7 +165,7 @@ def _run_pipeline(invoice_bytes: bytes, invoice_name: str,
     print("Invoice length:", len(invoice_text))
     print("PO length:", len(po_text))
 
-    comparison = compare_invoice_po(invoice_text, po_text)
+    comparison = compare_invoice_po(_prepare_llm_text(invoice_text), _prepare_llm_text(po_text))
     print("===== RAW LLM RESPONSE =====")
     print(comparison)
 
@@ -261,7 +257,7 @@ def verify_route():
                 error="Could not read the PDF properly. Please upload a clear file."
             )
 
-        result = compare_invoice_po(invoice_text, po_text)
+        result = compare_invoice_po(_prepare_llm_text(invoice_text), _prepare_llm_text(po_text))
     except Exception as e:
         print("VERIFY ROUTE ERROR:", str(e))
         return render_template(

@@ -1,190 +1,415 @@
-"""LLM comparison layer — calls Groq (llama-3.1-8b-instant) to compare Invoice vs PO.
+"""Deterministic structured comparison for invoice vs PO.
 
-Key fixes vs original:
-  - Prompt now EXPLICITLY instructs the model to quote verbatim text from the documents.
-  - Two-pass JSON extraction (regex before json.loads) eliminates markdown fencing issues.
-  - Input guard: refuses to call the API if either document is empty/too short.
-  - Debug: logs the raw model output so you can inspect hallucinations instantly.
-  - Returns a stable schema: {"discrepancies": [...], "summary": "...", "error": "..."|None}
+Fuzzy reconciliation layer
+--------------------------
+Before declaring a missing-item discrepancy, every unmatched invoice item is
+compared against every unmatched PO item using rapidfuzz token_set_ratio.
+If similarity >= ITEM_MATCH_THRESHOLD (default 85, env-configurable) the pair
+is treated as the same item and qty/price comparison is run normally.
+
+Price tolerance
+---------------
+PRICE_TOLERANCE (default 0, env-configurable) allows a small absolute or
+percentage difference to be ignored (e.g. rounding from different currencies).
+
+No LLM is involved in reconciliation decisions — all matching is
+deterministic text similarity + numeric comparison.
 """
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 import re
 
-import requests
+import parser as parser_module
+from parser import normalize_currency_value, normalize_item_name, normalize_quantity
+
+from extractors.llm_structured_extractor import extract_structured
 
 logger = logging.getLogger(__name__)
 
-_GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
-_MODEL = "llama-3.1-8b-instant"
-_TIMEOUT = 60
-_MIN_TEXT_LEN = 40  # guard against passing blank / garbage text to the LLM
-
+_MIN_TEXT_LEN = 40
 
 # ---------------------------------------------------------------------------
-# Prompt
+# Configuration (env-overridable)
 # ---------------------------------------------------------------------------
 
-_SYSTEM = (
-    "You are a document auditor. "
-    "You read an Invoice and a Purchase Order (PO) supplied by the user. "
-    "You ONLY use information that is literally present in those two documents. "
-    "You NEVER invent item names, quantities, or prices. "
-    "If a value is not readable in the text, say 'unreadable'."
+_ITEM_MATCH_THRESHOLD = int(os.getenv("ITEM_MATCH_THRESHOLD", "85"))
+_PRICE_TOLERANCE      = float(os.getenv("PRICE_TOLERANCE", "0"))
+
+print("USING NEW OCR-TOLERANT PARSER + LLM EXTRACTION + FUZZY RECONCILIATION")
+logger.warning(
+    "Parser import verification: module=%s file=%s function_id=%s | "
+    "ITEM_MATCH_THRESHOLD=%d PRICE_TOLERANCE=%g",
+    parser_module.__name__,
+    getattr(parser_module, "__file__", "unknown"),
+    id(normalize_currency_value),
+    _ITEM_MATCH_THRESHOLD,
+    _PRICE_TOLERANCE,
 )
 
-_USER_TEMPLATE = """
-Compare the following Invoice and Purchase Order.
-
-STRICT RULES:
-- ONLY return mismatches
-- If everything matches, return an EMPTY list []
-- DO NOT return matches
-- DO NOT explain correct values
-- DO NOT create fields like tax, total, other
-
-ONLY check:
-1. price mismatch
-2. quantity mismatch
-3. missing items
-
-Rules:
-- If item exists in both -> compare price and quantity ONLY
-- If item exists in PO but not in Invoice -> "missing_in_invoice"
-- If item exists in Invoice but not in PO -> "missing_in_po"
-- DO NOT duplicate entries
-- DO NOT hallucinate fields
-
-Invoice:
-{invoice_text}
-
-PO:
-{po_text}
-
-Return STRICT JSON:
-
-{{
-  "discrepancies": [
-    {{
-      "item": "",
-      "field": "",
-      "invoice_value": "",
-      "po_value": "",
-      "issue": ""
-    }}
-  ]
-}}
-"""
-
-
 # ---------------------------------------------------------------------------
-# Helpers
+# Fuzzy matching helpers
 # ---------------------------------------------------------------------------
 
-def _extract_json(raw: str) -> str:
-    """Strip markdown fences and return the first JSON object found."""
-    # Remove ```json ... ``` or ``` ... ```
-    raw = re.sub(r"```[a-z]*", "", raw).replace("```", "").strip()
-    # Find the outermost { ... }
-    match = re.search(r"\{.*\}", raw, re.DOTALL)
-    if match:
-        return match.group(0)
-    return raw
+# OCR residue tokens to strip before matching (single stray chars, OCR glyph artifacts)
+_OCR_RESIDUE_RE = re.compile(
+    r"\b(?:j|l|i|o|0|s|oty|oiy|otr|ltem|ltems)\b",
+    re.IGNORECASE,
+)
+_PUNCTUATION_RE = re.compile(r"[^a-z0-9\s]")
+_MULTI_SPACE_RE = re.compile(r"\s+")
 
 
-def _safe_parse(raw: str) -> dict:
-    cleaned = _extract_json(raw)
+# OCR digit → letter substitutions applied before similarity scoring
+# (handles common OCR glyph confusions: 0↔o, 1↔l/i, 3↔e, 5↔s, 8↔b)
+_DIGIT_LOOKALIKE: dict[str, str] = str.maketrans("01358", "oleso")
+
+
+def normalize_item_for_matching(text: str) -> str:
+    """Normalize an item name for fuzzy similarity comparison.
+
+    Steps
+    -----
+    1. Lowercase
+    2. OCR digit→letter substitution (0→o, 1→l, 3→e, 5→s, 8→b)
+    3. Remove punctuation (keep alphanumeric + spaces)
+    4. Strip OCR residue tokens (stray glyphs, misread labels)
+    5. Collapse multiple spaces → single space
+    6. Strip leading/trailing whitespace
+
+    Examples
+    --------
+    "Chair j"   -> "chair"
+    "cpu."      -> "cpu"
+    "lapt0p"    -> "laptop"   (0→o)
+    "monltor"   -> "monltor"  (similarity engine handles transpositions)
+    "LAPTOP 1"  -> "laptop l"
+    """
+    if not text:
+        return ""
+    s = str(text).lower()
+    s = s.translate(_DIGIT_LOOKALIKE)          # 0→o, 1→l, 3→e, 5→s, 8→b
+    s = _PUNCTUATION_RE.sub(" ", s)
+    s = _OCR_RESIDUE_RE.sub(" ", s)
+    s = _MULTI_SPACE_RE.sub(" ", s)
+    return s.strip()
+
+
+def _fuzzy_similarity(a: str, b: str) -> float:
+    """Return rapidfuzz token_set_ratio (0–100) between two normalised strings."""
     try:
-        parsed = json.loads(cleaned)
-    except json.JSONDecodeError as exc:
-        logger.error("JSON parse failed: %s\nRaw content was:\n%s", exc, raw[:800])
-        raise
-    if not isinstance(parsed, dict):
-        raise ValueError(f"Expected JSON object, got {type(parsed)}")
-    return parsed
+        from rapidfuzz.fuzz import token_set_ratio  # type: ignore
+        return token_set_ratio(a, b)
+    except ImportError:
+        # Graceful degradation: exact match only
+        logger.warning("[FUZZY] rapidfuzz not available; falling back to exact matching")
+        return 100.0 if a == b else 0.0
 
 
-def normalize_field(field):
-    if not field:
-        return "missing_in_invoice"
+def _build_fuzzy_match_map(
+    invoice_keys: list[str],
+    po_keys: list[str],
+) -> dict[str, str]:
+    """Build a mapping from invoice item key -> matched PO item key using fuzzy similarity.
 
-    field = field.lower().strip()
+    Algorithm
+    ---------
+    Greedy best-match: for each invoice item (sorted), find the highest-scoring
+    unmatched PO item. If score >= threshold, record the pair and remove both
+    from the candidate pool (prevents duplicate matching).
 
-    if field in ["qty", "quantity"]:
-        return "quantity"
-    if field in ["price", "rate"]:
-        return "price"
-    if "missing" in field:
-        return field
+    Returns
+    -------
+    dict mapping each invoice key that has a fuzzy match to its PO key.
+    Keys with exact matches are excluded (they are already handled upstream).
+    """
+    # Normalised forms for matching (keep map back to original keys)
+    inv_norm = {k: normalize_item_for_matching(k) for k in invoice_keys}
+    po_norm  = {k: normalize_item_for_matching(k) for k in po_keys}
 
-    return field
+    unmatched_po = set(po_keys)
+    match_map: dict[str, str] = {}          # invoice_key -> po_key
 
+    logger.info(
+        "[FUZZY] Building match map: %d invoice items vs %d PO items | threshold=%d",
+        len(invoice_keys), len(po_keys), _ITEM_MATCH_THRESHOLD,
+    )
 
-def normalize_issues(discrepancies):
-    fixed = []
+    for inv_key in sorted(invoice_keys):
+        inv_n = inv_norm[inv_key]
+        best_score = -1.0
+        best_po_key: str | None = None
 
-    for d in discrepancies:
-        item = d.get("item")
-        field = d.get("field", "").lower()
-        inv = d.get("invoice_value")
-        po = d.get("po_value")
-        issue = d.get("issue", "").lower()
+        for po_key in unmatched_po:
+            po_n = po_norm[po_key]
+            score = _fuzzy_similarity(inv_n, po_n)
+            logger.debug(
+                "[FUZZY] compare %r (%r) vs %r (%r) score=%.1f",
+                inv_key, inv_n, po_key, po_n, score,
+            )
+            if score > best_score:
+                best_score = score
+                best_po_key = po_key
 
-        # Fix wrong "missing" when both values exist
-        if inv not in [None, "", "unreadable"] and po not in [None, "", "unreadable"]:
-            if inv != po:
-                if "qty" in field or "quantity" in field:
-                    issue = "quantity mismatch"
-                elif "price" in field:
-                    issue = "price mismatch"
+        if best_po_key is not None and best_score >= _ITEM_MATCH_THRESHOLD:
+            match_map[inv_key] = best_po_key
+            unmatched_po.discard(best_po_key)
+            logger.info(
+                "[FUZZY] MATCHED %r -> %r (score=%.1f)",
+                inv_key, best_po_key, best_score,
+            )
+        else:
+            logger.info(
+                "[FUZZY] NO MATCH for %r (best_score=%.1f best_candidate=%r)",
+                inv_key, best_score, best_po_key,
+            )
 
-        # Fix actual missing
-        elif inv in [None, "", "unreadable"] and po not in [None, "", "unreadable"]:
-            issue = "missing_in_invoice"
-        elif po in [None, "", "unreadable"] and inv not in [None, "", "unreadable"]:
-            issue = "missing_in_po"
-
-        d["issue"] = issue
-        fixed.append(d)
-
-    return fixed
-
-
-def safe_number(value):
-    try:
-        value = str(value).replace(",", "").replace("₹", "").strip()
-        return float(value)
-    except Exception:
-        return None
+    return match_map
 
 
 # ---------------------------------------------------------------------------
-# Public API
+# Price tolerance helper
+# ---------------------------------------------------------------------------
+
+def _prices_within_tolerance(invoice_price, po_price) -> bool:
+    """Return True if the absolute difference is within PRICE_TOLERANCE."""
+    if _PRICE_TOLERANCE <= 0:
+        return False
+    try:
+        diff = abs(float(invoice_price) - float(po_price))
+        within = diff <= _PRICE_TOLERANCE
+        if within:
+            logger.info(
+                "[FUZZY] price tolerance accepted: invoice=%s po=%s diff=%.4f tolerance=%g",
+                invoice_price, po_price, diff, _PRICE_TOLERANCE,
+            )
+        return within
+    except (TypeError, ValueError):
+        return False
+
+
+# ---------------------------------------------------------------------------
+# Existing helpers (unchanged)
+# ---------------------------------------------------------------------------
+
+def _format_number(value):
+    if value is None:
+        return "N/A"
+    return value
+
+
+def _difference(left, right):
+    if left is None or right is None:
+        return "N/A"
+    left_num  = normalize_currency_value(left)
+    right_num = normalize_currency_value(right)
+    if left_num is None or right_num is None:
+        return "N/A"
+    diff = abs(float(left_num) - float(right_num))
+    return int(diff) if diff.is_integer() else round(diff, 2)
+
+
+def _group_items(line_items: list[dict]) -> dict[str, dict]:
+    grouped: dict[str, dict] = {}
+
+    for item in line_items:
+        item_name = normalize_item_name(item.get("item"))
+        if not item_name:
+            continue
+
+        bucket = grouped.setdefault(
+            item_name,
+            {
+                "item": item_name,
+                "entries": [],
+                "qty": 0,
+                "qty_values": [],
+                "price_values": [],
+            },
+        )
+
+        qty   = normalize_quantity(item.get("qty"))
+        price = normalize_currency_value(item.get("price"))
+        entry = {"item": item_name, "qty": qty, "price": price}
+        bucket["entries"].append(entry)
+
+        if qty is not None:
+            bucket["qty"]  += qty
+            bucket["qty_values"].append(qty)
+        if price is not None:
+            bucket["price_values"].append(price)
+
+    for bucket in grouped.values():
+        unique_prices = list(dict.fromkeys(bucket["price_values"]))
+        bucket["price"]         = unique_prices[0] if len(unique_prices) == 1 else None
+        bucket["has_duplicate"] = len(bucket["entries"]) > 1
+
+    return grouped
+
+
+def _duplicate_discrepancy(item: str, entries: list[dict], present_in: str) -> dict:
+    return {
+        "type": "duplicate_item",
+        "item": item,
+        "present_in": present_in,
+        "entry_count": len(entries),
+        "entries": entries,
+        "field": "item",
+        "invoice_value": len(entries) if present_in == "Invoice" else "N/A",
+        "po_value":      len(entries) if present_in == "PO"      else "N/A",
+        "difference": "N/A",
+        "issue": f"duplicate item in {present_in.lower()}",
+    }
+
+
+def _missing_discrepancy(
+    item: str,
+    present_in: str,
+    invoice_entry: list[dict] | None,
+    po_entry: list[dict] | None,
+) -> dict:
+    return {
+        "type": "missing_item",
+        "item": item,
+        "present_in": present_in,
+        "field": "item",
+        "invoice_value": invoice_entry or "N/A",
+        "po_value":      po_entry      or "N/A",
+        "difference": "N/A",
+        "issue": "missing_in_invoice" if present_in == "PO only" else "missing_in_po",
+    }
+
+
+def _value_mismatch(
+    item: str,
+    mismatch_type: str,
+    invoice_value,
+    po_value,
+) -> dict:
+    field       = "quantity" if mismatch_type == "quantity_mismatch" else "price"
+    invoice_key = "invoice_qty"   if field == "quantity" else "invoice_price"
+    po_key      = "po_qty"        if field == "quantity" else "po_price"
+    issue       = "quantity mismatch" if field == "quantity" else "price mismatch"
+    return {
+        "type": mismatch_type,
+        "item": item,
+        invoice_key: invoice_value,
+        po_key:      po_value,
+        "field":     field,
+        "invoice_value": _format_number(invoice_value),
+        "po_value":      _format_number(po_value),
+        "difference":    _difference(invoice_value, po_value),
+        "issue":         issue,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Core comparison — with fuzzy reconciliation injected
+# ---------------------------------------------------------------------------
+
+def _compare_groups(
+    invoice_groups: dict[str, dict],
+    po_groups: dict[str, dict],
+) -> list[dict]:
+    """Run the full discrepancy check with fuzzy item reconciliation.
+
+    Phase 1: Exact matches  — items whose normalised names are identical.
+    Phase 2: Fuzzy matches  — unmatched items paired by rapidfuzz similarity.
+    Phase 3: True missing   — items that survived both phases unmatched.
+
+    Within each matched pair, qty and price are compared deterministically.
+    """
+    discrepancies: list[dict] = []
+
+    # --- Phase 1: exact key intersection ---
+    exact_inv = set(invoice_groups)
+    exact_po  = set(po_groups)
+    exact_both = exact_inv & exact_po
+
+    unmatched_inv = sorted(exact_inv - exact_both)
+    unmatched_po  = sorted(exact_po  - exact_both)
+
+    logger.info(
+        "[FUZZY] Phase1 exact: matched=%d | unmatched_invoice=%d unmatched_po=%d",
+        len(exact_both), len(unmatched_inv), len(unmatched_po),
+    )
+
+    # --- Phase 2: fuzzy matching for unmatched items ---
+    fuzzy_map: dict[str, str] = {}   # invoice_key -> po_key
+    if unmatched_inv and unmatched_po:
+        fuzzy_map = _build_fuzzy_match_map(unmatched_inv, unmatched_po)
+
+    fuzzy_matched_inv = set(fuzzy_map.keys())
+    fuzzy_matched_po  = set(fuzzy_map.values())
+
+    # Collect all logical pairs to compare
+    # (display_name, invoice_bucket, po_bucket)
+    pairs_to_compare: list[tuple[str, dict, dict]] = []
+
+    for item in sorted(exact_both):
+        pairs_to_compare.append((item, invoice_groups[item], po_groups[item]))
+
+    for inv_key, po_key in sorted(fuzzy_map.items()):
+        # Use the invoice item name as the canonical display name
+        pairs_to_compare.append((inv_key, invoice_groups[inv_key], po_groups[po_key]))
+
+    # --- Compare each matched pair ---
+    for display_name, inv_bucket, po_bucket in pairs_to_compare:
+        invoice_qty = inv_bucket["qty"] if inv_bucket["qty_values"] else None
+        po_qty      = po_bucket["qty"]  if po_bucket["qty_values"]  else None
+
+        if invoice_qty is not None and po_qty is not None and invoice_qty != po_qty:
+            discrepancies.append(
+                _value_mismatch(display_name, "quantity_mismatch", invoice_qty, po_qty)
+            )
+
+        invoice_price = inv_bucket.get("price")
+        po_price      = po_bucket.get("price")
+
+        if invoice_price is not None and po_price is not None:
+            if invoice_price != po_price:
+                if not _prices_within_tolerance(invoice_price, po_price):
+                    discrepancies.append(
+                        _value_mismatch(display_name, "price_mismatch", invoice_price, po_price)
+                    )
+
+    # --- Phase 3: true missing items ---
+    truly_missing_inv = [k for k in unmatched_inv if k not in fuzzy_matched_inv]
+    truly_missing_po  = [k for k in unmatched_po  if k not in fuzzy_matched_po]
+
+    logger.info(
+        "[FUZZY] Phase3 truly missing: invoice_only=%d po_only=%d",
+        len(truly_missing_inv), len(truly_missing_po),
+    )
+
+    for item in sorted(truly_missing_po):
+        discrepancies.append(
+            _missing_discrepancy(item, "PO only", None, po_groups[item]["entries"])
+        )
+    for item in sorted(truly_missing_inv):
+        discrepancies.append(
+            _missing_discrepancy(item, "Invoice only", invoice_groups[item]["entries"], None)
+        )
+
+    return discrepancies
+
+
+# ---------------------------------------------------------------------------
+# Public entry point
 # ---------------------------------------------------------------------------
 
 def compare_invoice_po(invoice_text: str, po_text: str) -> dict:
-    """
-    Compare extracted invoice and PO text via Groq.
+    logger.info("CALL CHAIN discrepancy entrypoint=compare_invoice_po")
 
-    Returns:
-        {
-            "discrepancies": [...],
-            "summary": "...",
-            "error": None | "<message>"
-        }
-    """
-    # --- Input guard ---
     if len(invoice_text.strip()) < _MIN_TEXT_LEN:
         msg = (
             f"Invoice text is too short ({len(invoice_text.strip())} chars). "
             "OCR may have failed. Check the uploaded file."
         )
         logger.error(msg)
-        return {"discrepancies": [], "summary": "", "error": msg}
+        return {"discrepancies": [], "summary": "", "error": msg, "invoice_items": [], "po_items": []}
 
     if len(po_text.strip()) < _MIN_TEXT_LEN:
         msg = (
@@ -192,184 +417,146 @@ def compare_invoice_po(invoice_text: str, po_text: str) -> dict:
             "OCR may have failed. Check the uploaded file."
         )
         logger.error(msg)
-        return {"discrepancies": [], "summary": "", "error": msg}
+        return {"discrepancies": [], "summary": "", "error": msg, "invoice_items": [], "po_items": []}
 
-    # --- API key ---
-    groq_api_key = os.getenv("GROQ_API_KEY")
-    if not groq_api_key:
-        return {"discrepancies": [], "summary": "", "error": "Missing GROQ_API_KEY env var."}
+    logger.info("CALL CHAIN compare_invoice_po -> extract_structured(invoice_text)")
+    invoice_result = extract_structured(invoice_text, doc_hint="invoice")
+    logger.info("CALL CHAIN compare_invoice_po -> extract_structured(po_text)")
+    po_result      = extract_structured(po_text,      doc_hint="po")
 
-    # --- Build request ---
-    prompt = f"""
-You are an expert invoice auditor.
+    invoice_items = invoice_result.get("items", [])
+    po_items      = po_result.get("items",      [])
 
-Compare the Invoice and Purchase Order carefully.
-
-STRICT RULES (DO NOT VIOLATE):
-
-1. If an item exists in BOTH documents:
-   - If quantity differs → issue = "quantity mismatch"
-   - If price differs → issue = "price mismatch"
-   - DO NOT mark it as missing
-
-2. If item exists ONLY in Invoice:
-   → issue = "missing_in_po"
-
-3. If item exists ONLY in PO:
-   → issue = "missing_in_invoice"
-
-4. NEVER confuse mismatch with missing
-
-5. Use EXACT item names from text
-
-6. If a value is not readable:
-   → use "unreadable"
-
-7. Output ONLY valid JSON
-   - No explanation
-   - No markdown
-   - No extra text
-
-FORMAT:
-{{
-  "discrepancies": [
-    {{
-      "item": "...",
-      "field": "...",
-      "invoice_value": "...",
-      "po_value": "...",
-      "issue": "..."
-    }}
-  ]
-}}
-
----
-
-INVOICE:
-{invoice_text}
-
----
-
-PO:
-{po_text}
-"""
-
-    payload = {
-        "model": _MODEL,
-        "temperature": 0,
-        "messages": [
-            {"role": "system", "content": _SYSTEM},
-            {"role": "user", "content": prompt},
-        ],
-    }
-
-    headers = {
-        "Authorization": f"Bearer {groq_api_key}",
-        "Content-Type": "application/json",
-    }
-
-    # --- Call Groq ---
-    try:
-        response = requests.post(_GROQ_URL, headers=headers, json=payload, timeout=_TIMEOUT)
-        response.raise_for_status()
-    except requests.HTTPError as exc:
-        logger.error("Groq HTTP error %s: %s", exc.response.status_code, exc.response.text[:400])
-        return {"discrepancies": [], "summary": "", "error": str(exc)}
-    except requests.RequestException as exc:
-        logger.error("Groq request failed: %s", exc)
-        return {"discrepancies": [], "summary": "", "error": str(exc)}
-
-    raw_content = response.json()["choices"][0]["message"]["content"].strip()
-    logger.debug("=== RAW LLM OUTPUT ===\n%s\n=== END ===", raw_content)
-
-    # --- Parse ---
-    try:
-        parsed = _safe_parse(raw_content)
-    except (json.JSONDecodeError, ValueError) as exc:
+    # Bridge extractor output into the parser-doc shape expected by the API layer
+    def _extractor_to_parser_doc(ext_result: dict, ocr_text: str) -> dict:
+        inner = ext_result.get("_parser_doc") or {}
         return {
-            "discrepancies": [],
-            "summary": "",
-            "error": f"LLM returned unparseable JSON: {exc}. Raw: {raw_content[:300]}",
+            "line_items":             ext_result.get("items", []),
+            "skipped_rows":           inner.get("skipped_rows", []),
+            "parser_confidence_score": ext_result.get("extraction_confidence", 0.0),
+            "line_item_count":        len(ext_result.get("items", [])),
+            "failure_reason":         inner.get("failure_reason"),
+            "raw_ocr_preview":        (ocr_text or "")[:300],
+            "parsed_item_count":      len(ext_result.get("items", [])),
+            "skipped_row_count":      len(inner.get("skipped_rows", [])),
+            "parser_trace":           inner.get("parser_trace", {}),
+            "totals":                 inner.get("totals", {}),
+            "extraction_mode":        ext_result.get("extraction_mode", "unknown"),
+            "fallback_used":          ext_result.get("fallback_used", False),
+            "invoice_number":         ext_result.get("invoice_number", ""),
+            "vendor":                 ext_result.get("vendor", ""),
+            "date":                   ext_result.get("date", ""),
         }
 
-    discrepancies = parsed.get("discrepancies", [])
-    if not isinstance(discrepancies, list):
-        discrepancies = []
-    parsed["discrepancies"] = normalize_issues(discrepancies)
+    invoice_doc = _extractor_to_parser_doc(invoice_result, invoice_text)
+    po_doc      = _extractor_to_parser_doc(po_result,      po_text)
 
-    cleaned = []
-    seen = set()
+    invoice_parser = {
+        "skipped_rows":            invoice_doc.get("skipped_rows", []),
+        "parser_confidence_score": invoice_doc.get("parser_confidence_score", 0.0),
+        "line_item_count":         invoice_doc.get("line_item_count", 0),
+        "failure_reason":          invoice_doc.get("failure_reason"),
+        "raw_ocr_preview":         invoice_doc.get("raw_ocr_preview", ""),
+        "parsed_item_count":       invoice_doc.get("parsed_item_count", 0),
+        "skipped_row_count":       invoice_doc.get("skipped_row_count", 0),
+        "parser_trace":            invoice_doc.get("parser_trace", {}),
+        "extraction_mode":         invoice_doc.get("extraction_mode", "unknown"),
+        "fallback_used":           invoice_doc.get("fallback_used", False),
+    }
+    po_parser = {
+        "skipped_rows":            po_doc.get("skipped_rows", []),
+        "parser_confidence_score": po_doc.get("parser_confidence_score", 0.0),
+        "line_item_count":         po_doc.get("line_item_count", 0),
+        "failure_reason":          po_doc.get("failure_reason"),
+        "raw_ocr_preview":         po_doc.get("raw_ocr_preview", ""),
+        "parsed_item_count":       po_doc.get("parsed_item_count", 0),
+        "skipped_row_count":       po_doc.get("skipped_row_count", 0),
+        "parser_trace":            po_doc.get("parser_trace", {}),
+        "extraction_mode":         po_doc.get("extraction_mode", "unknown"),
+        "fallback_used":           po_doc.get("fallback_used", False),
+    }
 
-    for d in parsed["discrepancies"]:
-        if not isinstance(d, dict):
-            continue
+    logger.info("OCR -> parser trace invoice_raw_ocr_text: %s", invoice_text)
+    logger.info("OCR -> parser trace po_raw_ocr_text: %s", po_text)
+    logger.info("Parsed invoice items: %s", invoice_items)
+    logger.info("Parsed PO items: %s",      po_items)
+    logger.info("Invoice parser diagnostics: %s", invoice_parser)
+    logger.info("PO parser diagnostics: %s",      po_parser)
+    logger.info("invoice_items count=%d",  len(invoice_items))
+    logger.info("po_items count=%d",       len(po_items))
 
-        item = d.get("item")
-        field = str(d.get("field", "")).lower().strip()
-        inv = str(d.get("invoice_value", "")).strip()
-        po = str(d.get("po_value", "")).strip()
-        issue = d.get("issue", "")
-        issue_text = str(issue).lower().strip()
-        inv_clean = str(inv).strip()
-        po_clean = str(po).strip()
+    if not invoice_items and not po_items:
+        msg = "Could not parse structured invoice line items from OCR text."
+        failure_path = (
+            "llm.compare_invoice_po -> extract_structured -> "
+            "invoice_items empty and po_items empty"
+        )
+        logger.error(
+            "%s failure_path=%s invoice_failure_reason=%s po_failure_reason=%s",
+            msg, failure_path,
+            invoice_parser.get("failure_reason"),
+            po_parser.get("failure_reason"),
+        )
+        return {
+            "discrepancies":    [],
+            "summary":          "",
+            "error":            msg,
+            "invoice_items":    [],
+            "po_items":         po_items,
+            "invoice_totals":   invoice_doc.get("totals", {}),
+            "po_totals":        po_doc.get("totals", {}),
+            "invoice_parser":   invoice_parser,
+            "po_parser":        po_parser,
+            "failure_path":     failure_path,
+        }
 
-        # Skip empty item
-        if not item:
-            continue
+    warning = None
+    if not invoice_items and po_items:
+        warning = (
+            "Invoice parser returned no line items; continuing reconciliation with PO items only. "
+            f"invoice_failure_reason={invoice_parser.get('failure_reason')}"
+        )
+        logger.warning("%s failure_path=llm.compare_invoice_po.partial_invoice_parse", warning)
+    if not po_items and invoice_items:
+        warning = (
+            "PO parser returned no line items; continuing reconciliation with invoice items only. "
+            f"po_failure_reason={po_parser.get('failure_reason')}"
+        )
+        logger.warning("%s failure_path=llm.compare_invoice_po.partial_po_parse", warning)
 
-        # Remove fake/no-issue rows
-        if any(word in issue_text for word in ["no issue", "matched", "same", "identical", "correct"]):
-            continue
+    invoice_groups = _group_items(invoice_items)
+    po_groups      = _group_items(po_items)
 
-        # Normalize fields
-        if field in ["qty", "quantity"]:
-            field = "quantity"
-        elif field in ["price", "rate"]:
-            field = "price"
+    # Duplicate detection (unchanged)
+    discrepancies: list[dict] = []
+    for item, bucket in invoice_groups.items():
+        if bucket["has_duplicate"]:
+            discrepancies.append(_duplicate_discrepancy(item, bucket["entries"], "Invoice"))
+    for item, bucket in po_groups.items():
+        if bucket["has_duplicate"]:
+            discrepancies.append(_duplicate_discrepancy(item, bucket["entries"], "PO"))
 
-        d["field"] = field
+    # Fuzzy-aware comparison
+    discrepancies.extend(_compare_groups(invoice_groups, po_groups))
 
-        # Normalize missing values
-        if inv.lower() in ["unreadable", "", "none"]:
-            d["invoice_value"] = "N/A"
+    logger.info("Detected mismatches: %s", discrepancies)
+    logger.info(
+        "CALL CHAIN compare_invoice_po -> discrepancy engine complete mismatches=%d",
+        len(discrepancies),
+    )
 
-        if po.lower() in ["unreadable", "", "none"]:
-            d["po_value"] = "N/A"
-
-        # Deterministic rupee difference (computed in Python, never by LLM)
-        inv_num = safe_number(inv)
-        po_num = safe_number(po)
-
-        if inv_num is not None and po_num is not None:
-            diff = abs(inv_num - po_num)
-
-            # Remove decimal if whole number
-            if diff.is_integer():
-                diff = int(diff)
-
-            d["difference"] = str(diff)
-        else:
-            d["difference"] = "N/A"
-
-        # Remove rows where values are identical and difference is zero
-        if inv_clean == po_clean and d["difference"] == "0":
-            continue
-
-        # Remove false "missing" rows when values are actually equal
-        if "missing" in issue_text and inv_clean == po_clean:
-            continue
-
-        # Keep previous identical-value filter for non-missing issues
-        if inv_clean == po_clean and "missing" not in issue_text:
-            continue
-
-        # Remove duplicates
-        key = (item, field, d.get("invoice_value"), d.get("po_value"))
-        if key in seen:
-            continue
-        seen.add(key)
-
-        cleaned.append(d)
-
-    parsed["discrepancies"] = cleaned
-    return parsed
+    return {
+        "discrepancies": discrepancies,
+        "summary": (
+            f"{len(discrepancies)} discrepancy(s) found."
+            if discrepancies else "No discrepancies found."
+        ),
+        "error":          None,
+        "warning":        warning,
+        "invoice_items":  invoice_items,
+        "po_items":       po_items,
+        "invoice_totals": invoice_doc.get("totals", {}),
+        "po_totals":      po_doc.get("totals", {}),
+        "invoice_parser": invoice_parser,
+        "po_parser":      po_parser,
+    }

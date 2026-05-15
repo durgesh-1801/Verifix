@@ -1,83 +1,89 @@
-# ================================
-# Python and Flask Project Ignore
-# ================================
+# ==========================================
+# Verifix - AI Invoice Verification
+# ==========================================
 
-# Byte-compiled / optimized / DLL files
-__pycache__/
-*.py[cod]
-*$py.class
-
-# Virtual Environment folders
+# Environments
 venv/
 env/
 .venv/
-
-# Flask instance folder
-instance/
-
-# Logs and debug files
-*.log
-*.out
-*.err
-
-# Operating system files
-.DS_Store
-Thumbs.db
-
-# ===================================
-# IDE / Editor Config Files
-# ===================================
-.vscode/
-.idea/
-*.sublime-project
-*.sublime-workspace
-
-# ===================================
-# Build and distribution folders
-# ===================================
-build/
-dist/
-*.egg-info/
-.eggs/
-
-# ===================================
-# Sensitive Files and API Keys
-# ===================================
-client_secret.json
-token.pickle
 .env
-*.json
-*.key
-*.pem
 
-# ===================================
-# Project-specific exclusions
-# ===================================
-
-
-
-# Uploaded or temporary files
-uploads/
-*.tmp
-*.bak
-
-# Cache and test folders
-.cache/
+# Python
 __pycache__/
-tests/__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
 
-# ===================================
-# Node/Frontend related
-# ===================================
-node_modules/
-package-lock.json
-npm-debug.log
+# Flask / Application Data
+instance/
+uploads/
+debug/
+*.log
+logs/
 
-# ===================================
-# Reports / Documentation
-# ===================================
-*.pdf
-*.docx
-*.pptx
-*.xlsx
-*.zip
+# PaddleOCR / Machine Learning
+.paddleocr/
+.paddlex/
+inference/
+models/
+*.pdmodel
+*.pdiparams
+*.pdiparams.info
+*.onnx
+
+# OS / Temporary Files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+*.swp
+*~
+*.bak
+*.tmp
+.temp/
+
+# IDE / Editor
+.idea/
+.vscode/
+*.swp
+*.swo
+.project
+.settings/
+
+# Testing / Coverage
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+cover/
+
+# Other Caches
+.gemini/

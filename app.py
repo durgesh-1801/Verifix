@@ -38,7 +38,6 @@ from google_auth_oauthlib.flow import Flow
 
 from llm import compare_invoice_po
 from ocr import extract_text_from_pdf
-from parser import build_structured_document
 
 
 os.environ["OAUTHLIB_INSECURE_TRANSPORT"] = "1"
@@ -78,21 +77,6 @@ def _extract_text(file_bytes: bytes, filename: str) -> str:
         return extract_text_from_pdf(file_bytes)
     logger.warning("Unsupported file type '%s' for '%s'", ext, filename)
     return ""
-
-
-def _prepare_llm_text(raw_text: str) -> str:
-    """Preserve raw text, but prepend structured line items when parsing succeeds."""
-    structured = build_structured_document(raw_text)
-    if not structured.get("parse_success"):
-        return raw_text
-
-    structured_block = (
-        "STRUCTURED_LINE_ITEMS_JSON:\n"
-        f"{structured['structured_json']}\n\n"
-        "RAW_DOCUMENT_TEXT:\n"
-        f"{raw_text}"
-    )
-    return structured_block
 
 
 def _read_upload(field_name: str) -> tuple[bytes, str] | tuple[None, None]:
@@ -135,10 +119,11 @@ def _json_error_payload(invoice_text: str, po_text: str):
 def _run_pipeline(invoice_bytes: bytes, invoice_name: str,
                   po_bytes: bytes, po_name: str) -> dict:
     """
-    Full pipeline: extract text -> call LLM -> return structured result.
+    Full pipeline: extract text -> structured compare -> return structured result.
     Logs every stage so you can see exactly where data breaks.
     """
     try:
+        logger.info("CALL CHAIN _run_pipeline -> _extract_text invoice=%s po=%s", invoice_name, po_name)
         invoice_text = _extract_text(invoice_bytes, invoice_name)
         po_text = _extract_text(po_bytes, po_name)
     except Exception as exc:
@@ -161,13 +146,9 @@ def _run_pipeline(invoice_bytes: bytes, invoice_name: str,
             "raw_response": {},
         }
 
-    print("===== SENDING TO LLM =====")
-    print("Invoice length:", len(invoice_text))
-    print("PO length:", len(po_text))
-
-    comparison = compare_invoice_po(_prepare_llm_text(invoice_text), _prepare_llm_text(po_text))
-    print("===== RAW LLM RESPONSE =====")
-    print(comparison)
+    logger.info("CALL CHAIN _run_pipeline -> compare_invoice_po invoice_length=%d po_length=%d", len(invoice_text), len(po_text))
+    comparison = compare_invoice_po(invoice_text, po_text)
+    logger.info("Comparison result: %s", comparison)
 
     return {
         "invoice_text": invoice_text,
@@ -175,6 +156,12 @@ def _run_pipeline(invoice_bytes: bytes, invoice_name: str,
         "discrepancies": comparison.get("discrepancies", []),
         "summary": comparison.get("summary", ""),
         "error": comparison.get("error"),
+        "warning": comparison.get("warning"),
+        "failure_path": comparison.get("failure_path"),
+        "invoice_items": comparison.get("invoice_items", []),
+        "po_items": comparison.get("po_items", []),
+        "invoice_parser": comparison.get("invoice_parser", {}),
+        "po_parser": comparison.get("po_parser", {}),
         "raw_response": comparison,
     }
 
@@ -195,6 +182,7 @@ def upload_page():
 
 @app.route("/verify", methods=["POST"])
 def verify_route():
+    logger.info("CALL CHAIN /verify -> extract_text_from_pdf(invoice) -> extract_text_from_pdf(po) -> compare_invoice_po")
     # 1) CHECK BOTH FILES EXIST
     invoice_file = request.files.get("invoiceFile")
     po_file = request.files.get("poFile")
@@ -245,10 +233,14 @@ def verify_route():
             error="File size must be under 10MB."
         )
 
-    # 5) WRAP OCR + LLM CALLS IN TRY/EXCEPT
+    # 5) WRAP OCR + COMPARISON CALLS IN TRY/EXCEPT
     try:
+        logger.info("CALL CHAIN /verify -> OCR extraction start for invoiceFile")
         invoice_text = extract_text_from_pdf(invoice_file.stream.read())
+        logger.info("CALL CHAIN /verify -> OCR extraction complete for invoiceFile chars=%d", len(invoice_text))
+        logger.info("CALL CHAIN /verify -> OCR extraction start for poFile")
         po_text = extract_text_from_pdf(po_file.stream.read())
+        logger.info("CALL CHAIN /verify -> OCR extraction complete for poFile chars=%d", len(po_text))
 
         if len(invoice_text.strip()) < 20 or len(po_text.strip()) < 20:
             return render_template(
@@ -257,7 +249,8 @@ def verify_route():
                 error="Could not read the PDF properly. Please upload a clear file."
             )
 
-        result = compare_invoice_po(_prepare_llm_text(invoice_text), _prepare_llm_text(po_text))
+        logger.info("CALL CHAIN /verify -> compare_invoice_po invoice_length=%d po_length=%d", len(invoice_text), len(po_text))
+        result = compare_invoice_po(invoice_text, po_text)
     except Exception as e:
         print("VERIFY ROUTE ERROR:", str(e))
         return render_template(
@@ -319,11 +312,52 @@ def verify_invoice_json():
     result = _run_pipeline(invoice_bytes, invoice_name, po_bytes, po_name)
 
     if result.get("error"):
-        return jsonify({"error": result["error"], "discrepancies": []}), 422
+        return jsonify({
+            "error": result["error"],
+            "warning": result.get("warning"),
+            "failure_path": result.get("failure_path"),
+            "discrepancies": [],
+            "invoice_parser": result.get("invoice_parser", {}),
+            "po_parser": result.get("po_parser", {}),
+            "parser_diagnostics": {
+                "invoice": {
+                    "raw_ocr_preview": result.get("invoice_parser", {}).get("raw_ocr_preview", ""),
+                    "parsed_item_count": result.get("invoice_parser", {}).get("parsed_item_count", 0),
+                    "skipped_row_count": result.get("invoice_parser", {}).get("skipped_row_count", 0),
+                    "parser_confidence_score": result.get("invoice_parser", {}).get("parser_confidence_score", 0.0),
+                },
+                "po": {
+                    "raw_ocr_preview": result.get("po_parser", {}).get("raw_ocr_preview", ""),
+                    "parsed_item_count": result.get("po_parser", {}).get("parsed_item_count", 0),
+                    "skipped_row_count": result.get("po_parser", {}).get("skipped_row_count", 0),
+                    "parser_confidence_score": result.get("po_parser", {}).get("parser_confidence_score", 0.0),
+                },
+            },
+        }), 422
 
     return jsonify({
         "invoice_text": result["invoice_text"],
         "po_text": result["po_text"],
+        "warning": result.get("warning"),
+        "failure_path": result.get("failure_path"),
+        "invoice_items": result.get("invoice_items", []),
+        "po_items": result.get("po_items", []),
+        "invoice_parser": result.get("invoice_parser", {}),
+        "po_parser": result.get("po_parser", {}),
+        "parser_diagnostics": {
+            "invoice": {
+                "raw_ocr_preview": result.get("invoice_parser", {}).get("raw_ocr_preview", ""),
+                "parsed_item_count": result.get("invoice_parser", {}).get("parsed_item_count", 0),
+                "skipped_row_count": result.get("invoice_parser", {}).get("skipped_row_count", 0),
+                "parser_confidence_score": result.get("invoice_parser", {}).get("parser_confidence_score", 0.0),
+            },
+            "po": {
+                "raw_ocr_preview": result.get("po_parser", {}).get("raw_ocr_preview", ""),
+                "parsed_item_count": result.get("po_parser", {}).get("parsed_item_count", 0),
+                "skipped_row_count": result.get("po_parser", {}).get("skipped_row_count", 0),
+                "parser_confidence_score": result.get("po_parser", {}).get("parser_confidence_score", 0.0),
+            },
+        },
         "discrepancies": result["discrepancies"],
         "summary": result.get("summary", ""),
     })

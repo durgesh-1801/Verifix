@@ -1,0 +1,15 @@
+@import 'tailwindcss';
+
+@theme {
+  --font-sans: 'Inter', ui-sans-serif, system-ui, sans-serif;
+  --color-brand: #5b3df5;
+  --color-brand-dark: #4a32c8;
+  --color-surface: #f9fafb;
+  --color-ink: #1a1c2e;
+}
+
+body {
+  margin: 0;
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}

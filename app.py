@@ -184,23 +184,15 @@ def upload_page():
 def verify_route():
     logger.info("CALL CHAIN /verify -> extract_text_from_pdf(invoice) -> extract_text_from_pdf(po) -> compare_invoice_po")
     # 1) CHECK BOTH FILES EXIST
-    invoice_file = request.files.get("invoiceFile")
-    po_file = request.files.get("poFile")
+    invoice_file = request.files.get("invoice")
+    po_file = request.files.get("purchase_order")
 
     if not invoice_file or not po_file:
-        return render_template(
-            "upload.html",
-            status="Error",
-            error="Please upload both PDF files."
-        )
+        return jsonify({"error": True, "message": "Please upload both PDF files."}), 400
 
     # 2) CHECK FILE EXTENSION (.pdf only)
     if not (invoice_file.filename or "").lower().endswith(".pdf") or not (po_file.filename or "").lower().endswith(".pdf"):
-        return render_template(
-            "upload.html",
-            status="Error",
-            error="Please upload PDF files only."
-        )
+        return jsonify({"error": True, "message": "Please upload PDF files only."}), 400
 
     # 3) CHECK PDF MAGIC BYTES (%PDF)
     invoice_header = invoice_file.stream.read(4)
@@ -209,11 +201,7 @@ def verify_route():
     po_file.stream.seek(0)
 
     if invoice_header != b"%PDF" or po_header != b"%PDF":
-        return render_template(
-            "upload.html",
-            status="Error",
-            error="Invalid PDF file detected."
-        )
+        return jsonify({"error": True, "message": "Invalid PDF file detected."}), 400
 
     # 4) CHECK FILE SIZE (max 10MB each)
     MAX_FILE_SIZE = 10 * 1024 * 1024
@@ -227,37 +215,25 @@ def verify_route():
     po_file.stream.seek(0)
 
     if invoice_size > MAX_FILE_SIZE or po_size > MAX_FILE_SIZE:
-        return render_template(
-            "upload.html",
-            status="Error",
-            error="File size must be under 10MB."
-        )
+        return jsonify({"error": True, "message": "File size must be under 10MB."}), 400
 
     # 5) WRAP OCR + COMPARISON CALLS IN TRY/EXCEPT
     try:
-        logger.info("CALL CHAIN /verify -> OCR extraction start for invoiceFile")
+        logger.info("CALL CHAIN /verify -> OCR extraction start for invoice")
         invoice_text = extract_text_from_pdf(invoice_file.stream.read())
-        logger.info("CALL CHAIN /verify -> OCR extraction complete for invoiceFile chars=%d", len(invoice_text))
-        logger.info("CALL CHAIN /verify -> OCR extraction start for poFile")
+        logger.info("CALL CHAIN /verify -> OCR extraction complete for invoice chars=%d", len(invoice_text))
+        logger.info("CALL CHAIN /verify -> OCR extraction start for purchase_order")
         po_text = extract_text_from_pdf(po_file.stream.read())
-        logger.info("CALL CHAIN /verify -> OCR extraction complete for poFile chars=%d", len(po_text))
+        logger.info("CALL CHAIN /verify -> OCR extraction complete for purchase_order chars=%d", len(po_text))
 
         if len(invoice_text.strip()) < 20 or len(po_text.strip()) < 20:
-            return render_template(
-                "upload.html",
-                status="Error",
-                error="Could not read the PDF properly. Please upload a clear file."
-            )
+            return jsonify({"error": True, "message": "Could not read the PDF properly. Please upload a clear file."}), 422
 
         logger.info("CALL CHAIN /verify -> compare_invoice_po invoice_length=%d po_length=%d", len(invoice_text), len(po_text))
         result = compare_invoice_po(invoice_text, po_text)
     except Exception as e:
-        print("VERIFY ROUTE ERROR:", str(e))
-        return render_template(
-            "upload.html",
-            status="Error",
-            error="We could not process these documents. Please try again."
-        )
+        logger.error("VERIFY ROUTE ERROR: %s", str(e))
+        return jsonify({"error": True, "message": "We could not process these documents. Please try again."}), 500
 
     discrepancies = result.get("discrepancies", [])
     total_difference = 0
@@ -275,13 +251,20 @@ def verify_route():
         total_difference = int(total_difference)
 
     if result.get("error"):
-        status = "Error"
-    elif len(discrepancies) > 0:
+        return jsonify({"error": True, "message": result.get("error")}), 422
+    
+    if len(discrepancies) > 0:
         status = "Discrepancies Found"
     else:
-        status = "Matched ✅"
+        status = "No Discrepancies Found"
 
-    return render_template("upload.html", result=result, status=status, total_difference=total_difference)
+    return jsonify({
+        "status": status,
+        "total_issues": len(discrepancies),
+        "total_rupee_difference": total_difference,
+        "discrepancies": discrepancies
+    })
+
 
 
 @app.route("/api/verify-invoice", methods=["POST"])

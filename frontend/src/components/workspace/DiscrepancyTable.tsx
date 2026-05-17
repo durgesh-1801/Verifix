@@ -1,5 +1,11 @@
 import type { Discrepancy } from '../../types'
 
+function renderCellValue(value: unknown): string | number {
+  if (value == null) return 'N/A'
+  if (typeof value === 'object') return JSON.stringify(value)
+  return String(value)
+}
+
 export function DiscrepancyTable({ rows }: { rows: Discrepancy[] }) {
   if (rows.length === 0) {
     return (
@@ -27,8 +33,8 @@ export function DiscrepancyTable({ rows }: { rows: Discrepancy[] }) {
             <tr key={`${d.item}-${d.field}-${i}`} className="border-b border-gray-100 last:border-0">
               <td className="max-w-[180px] px-4 py-3 font-medium text-[#1A1C2E]">{d.item}</td>
               <td className="px-4 py-3 text-slate-700">{d.field}</td>
-              <td className="px-4 py-3 text-slate-700">{d.invoice_value}</td>
-              <td className="px-4 py-3 text-slate-700">{d.po_value}</td>
+              <td className="px-4 py-3 text-slate-700 font-mono text-[11px] break-all">{renderCellValue(d.invoice)}</td>
+              <td className="px-4 py-3 text-slate-700 font-mono text-[11px] break-all">{renderCellValue(d.po)}</td>
               <td className="px-4 py-3 font-medium text-[#5B3DF5]">{d.difference ?? 'N/A'}</td>
               <td className="max-w-[220px] px-4 py-3 text-slate-600">{d.issue}</td>
             </tr>

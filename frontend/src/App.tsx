@@ -1,7 +1,7 @@
 import { useCallback, useMemo, useState } from 'react'
 import { downloadPdfReport, verifyInvoice } from './api'
 import type { VerifySuccessResponse } from './types'
-import { sumRupeeDifference, verificationStatusFrom } from './totals'
+
 import { scrollToId } from './lib/scroll'
 import { Navbar } from './components/layout/Navbar'
 import { Footer } from './components/layout/Footer'
@@ -24,12 +24,10 @@ export default function App() {
 
   const totals = useMemo(() => {
     if (!result) return null
-    const diff = sumRupeeDifference(result.discrepancies)
-    const status = verificationStatusFrom(result.discrepancies)
     return {
-      totalIssues: result.discrepancies.length,
-      totalRupeeDifference: diff,
-      status,
+      totalIssues: result.total_issues,
+      totalRupeeDifference: result.total_rupee_difference,
+      status: result.status,
     }
   }, [result])
 

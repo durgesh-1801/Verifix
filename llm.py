@@ -259,6 +259,8 @@ def _duplicate_discrepancy(item: str, entries: list[dict], present_in: str) -> d
         "field": "item",
         "invoice_value": len(entries) if present_in == "Invoice" else "N/A",
         "po_value":      len(entries) if present_in == "PO"      else "N/A",
+        "invoice":       len(entries) if present_in == "Invoice" else None,
+        "po":            len(entries) if present_in == "PO"      else None,
         "difference": "N/A",
         "issue": f"duplicate item in {present_in.lower()}",
     }
@@ -277,6 +279,8 @@ def _missing_discrepancy(
         "field": "item",
         "invoice_value": invoice_entry or "N/A",
         "po_value":      po_entry      or "N/A",
+        "invoice":       invoice_entry,
+        "po":            po_entry,
         "difference": "N/A",
         "issue": "missing_in_invoice" if present_in == "PO only" else "missing_in_po",
     }
@@ -300,6 +304,8 @@ def _value_mismatch(
         "field":     field,
         "invoice_value": _format_number(invoice_value),
         "po_value":      _format_number(po_value),
+        "invoice":       invoice_value,
+        "po":            po_value,
         "difference":    _difference(invoice_value, po_value),
         "issue":         issue,
     }

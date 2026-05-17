@@ -1,17 +1,17 @@
 export type Discrepancy = {
   item: string
   field: string
-  invoice_value: string
-  po_value: string
+  invoice: string
+  po: string
   issue: string
   difference?: string
 }
 
 export type VerifySuccessResponse = {
-  invoice_text: string
-  po_text: string
+  status: string
+  total_issues: number
+  total_rupee_difference: number
   discrepancies: Discrepancy[]
-  summary: string
 }
 
 export type VerifyErrorBody = {

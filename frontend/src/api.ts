@@ -9,7 +9,7 @@ export function apiOrigin(): string {
   if (typeof raw === 'string' && raw.trim().length > 0) {
     return raw.replace(/\/$/, '')
   }
-  return ''
+  return 'http://127.0.0.1:5000'
 }
 
 function url(path: string): string {
@@ -22,10 +22,10 @@ export async function verifyInvoice(
   poFile: File,
 ): Promise<{ ok: true; data: VerifySuccessResponse } | { ok: false; status: number; body: VerifyErrorBody }> {
   const fd = new FormData()
-  fd.append('invoiceFile', invoiceFile)
-  fd.append('poFile', poFile)
+  fd.append('invoice', invoiceFile)
+  fd.append('purchase_order', poFile)
 
-  const res = await fetch(url('/api/verify-invoice'), {
+  const res = await fetch(url('/verify'), {
     method: 'POST',
     body: fd,
   })

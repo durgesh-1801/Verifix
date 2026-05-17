@@ -160,12 +160,7 @@ export function WorkspaceSection({
             />
           </div>
 
-          {result.summary ? (
-            <div className="rounded-xl border border-[#5B3DF5]/20 bg-[#5B3DF5]/5 p-4 text-sm text-slate-800">
-              <p className="text-xs font-semibold uppercase tracking-wide text-[#5B3DF5]">Summary</p>
-              <p className="mt-2 whitespace-pre-wrap">{result.summary}</p>
-            </div>
-          ) : null}
+
 
           <div>
             <h3 className="mb-3 text-lg font-bold text-[#1A1C2E]">Discrepancy table</h3>

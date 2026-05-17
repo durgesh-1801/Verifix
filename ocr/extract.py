@@ -35,6 +35,28 @@ _PADDLE_OCR_RUNNER = None
 _PADDLE_OCR_RUNNER_NAME = "uninitialized"
 _DEBUG_DIR = Path("uploads") / "debug"
 
+# ---------------------------------------------------------------------------
+# Tesseract Setup
+# ---------------------------------------------------------------------------
+try:
+    pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+    _tess_version = pytesseract.get_tesseract_version()
+    logger.info("[TESSERACT] initialized")
+    logger.info("[TESSERACT] version=%s, path=%s", _tess_version, pytesseract.pytesseract.tesseract_cmd)
+except Exception as exc:
+    logger.warning("[TESSERACT] initialization failed: %s", exc)
+
+
+def test_tesseract_ocr(image_path: str) -> None:
+    try:
+        img = Image.open(image_path)
+        text = pytesseract.image_to_string(img)
+        logger.info("[TESSERACT] extraction_preview=%r", text[:300])
+        logger.info("[TESSERACT] fallback_active=True")
+    except Exception as exc:
+        logger.warning("[TESSERACT] Test failed for image %r: %s", image_path, exc)
+
+
 
 def _clean_text(text: str) -> str:
     if not text:

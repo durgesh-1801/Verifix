@@ -1,6 +1,6 @@
 # 🧾 Verifix (AI-Powered Invoice & Purchase Order Verification System) 
-### Built for MUJ HACKX 3.0 | Theme: FinTech  
-#### By Team **Quantum Crew**
+Theme: FinTech  
+#### By Team **Kasukabe Coders**
 
 ---
 

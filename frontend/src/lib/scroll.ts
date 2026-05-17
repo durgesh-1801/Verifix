@@ -7,4 +7,8 @@ export function scrollToId(id: string) {
             block: "start",
         });
     }
+<<<<<<< HEAD
 }
+=======
+}
+>>>>>>> 2783139 (Add frontend scroll utility)

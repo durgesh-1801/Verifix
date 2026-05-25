@@ -48,6 +48,22 @@ def detect_pdf_type(file_bytes: bytes) -> dict:
 
     data = bytes(file_bytes)
 
+    # Check for encrypted PDF
+    try:
+        doc = fitz.open(stream=data, filetype="pdf")
+        if doc.is_encrypted:
+            doc.close()
+            return {
+                "pdf_type": "encrypted",
+                "reason": "pdf_is_encrypted",
+                "text_length": 0,
+                "page_count": 0,
+                "avg_chars_per_page": 0.0,
+            }
+        doc.close()
+    except Exception as exc:
+        logger.debug("Encrypted PDF check failed: %s", exc)
+
     fitz_text = ""
     fitz_pages = 0
     plumber_text = ""

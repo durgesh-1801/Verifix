@@ -25,8 +25,9 @@ from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, Tabl
 load_dotenv()
 
 # ── Configure logging BEFORE any other import that uses the logger ──────────
+_LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(
-    level=logging.DEBUG,          # flip to INFO in production
+    level=getattr(logging, _LOG_LEVEL, logging.INFO),
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
 logger = logging.getLogger(__name__)
@@ -40,11 +41,29 @@ from llm import compare_invoice_po
 from ocr import extract_text_from_pdf
 
 
-os.environ["OAUTHLIB_INSECURE_TRANSPORT"] = "1"
+if os.getenv("FLASK_ENV") == "development":
+    os.environ["OAUTHLIB_INSECURE_TRANSPORT"] = "1"
 
 app = Flask(__name__)
-app.secret_key = os.urandom(24)
+app.secret_key = os.getenv("FLASK_SECRET_KEY", "").encode() or os.urandom(24)
 CORS(app)
+app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024
+
+
+@app.errorhandler(404)
+def not_found(e):
+    return jsonify({"error": True, "message": "Endpoint not found."}), 404
+
+
+@app.errorhandler(413)
+def request_too_large(e):
+    return jsonify({"error": True, "message": "File too large. Maximum upload size is 16 MB."}), 413
+
+
+@app.errorhandler(500)
+def internal_error(e):
+    logger.error("Internal server error: %s", e)
+    return jsonify({"error": True, "message": "Internal server error. Please try again."}), 500
 
 SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"]
 CLIENT_SECRETS_FILE = "client_secret.json"
@@ -162,6 +181,7 @@ def _run_pipeline(invoice_bytes: bytes, invoice_name: str,
         "po_items": comparison.get("po_items", []),
         "invoice_parser": comparison.get("invoice_parser", {}),
         "po_parser": comparison.get("po_parser", {}),
+        "confidence_flags": comparison.get("confidence_flags", []),
         "raw_response": comparison,
     }
 
@@ -202,6 +222,22 @@ def verify_route():
 
     if invoice_header != b"%PDF" or po_header != b"%PDF":
         return jsonify({"error": True, "message": "Invalid PDF file detected."}), 400
+
+    # 3b) CHECK FOR ENCRYPTED PDF
+    try:
+        import fitz
+        for label, fobj in [("Invoice", invoice_file), ("PO", po_file)]:
+            fobj.stream.seek(0)
+            doc = fitz.open(stream=fobj.stream.read(), filetype="pdf")
+            if doc.is_encrypted:
+                doc.close()
+                return jsonify({"error": True, "message": f"{label} PDF is encrypted/password-protected. Please upload an unprotected file."}), 400
+            doc.close()
+            fobj.stream.seek(0)
+    except ImportError:
+        pass
+    except Exception as exc:
+        logger.warning("Encrypted PDF check failed: %s", exc)
 
     # 4) CHECK FILE SIZE (max 10MB each)
     MAX_FILE_SIZE = 10 * 1024 * 1024
@@ -262,7 +298,8 @@ def verify_route():
         "status": status,
         "total_issues": len(discrepancies),
         "total_rupee_difference": total_difference,
-        "discrepancies": discrepancies
+        "discrepancies": discrepancies,
+        "confidence_flags": result.get("confidence_flags", [])
     })
 
 
@@ -316,6 +353,7 @@ def verify_invoice_json():
                     "parser_confidence_score": result.get("po_parser", {}).get("parser_confidence_score", 0.0),
                 },
             },
+            "confidence_flags": result.get("confidence_flags", [])
         }), 422
 
     return jsonify({
@@ -343,6 +381,7 @@ def verify_invoice_json():
         },
         "discrepancies": result["discrepancies"],
         "summary": result.get("summary", ""),
+        "confidence_flags": result.get("confidence_flags", [])
     })
 
 

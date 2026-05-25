@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import logging
+import os
 import re
+import threading
 from inspect import signature
 from io import BytesIO
 from pathlib import Path
@@ -34,15 +36,17 @@ _PADDLE_OCR_INIT_FAILED = False
 _PADDLE_OCR_RUNNER = None
 _PADDLE_OCR_RUNNER_NAME = "uninitialized"
 _DEBUG_DIR = Path("uploads") / "debug"
+_OCR_DEBUG = os.getenv("OCR_DEBUG", "0") == "1"
 
 # ---------------------------------------------------------------------------
 # Tesseract Setup
 # ---------------------------------------------------------------------------
 try:
-    pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+    _tesseract_cmd = os.getenv("TESSERACT_CMD", r"C:\Program Files\Tesseract-OCR\tesseract.exe")
+    pytesseract.pytesseract.tesseract_cmd = _tesseract_cmd
     _tess_version = pytesseract.get_tesseract_version()
     logger.info("[TESSERACT] initialized")
-    logger.info("[TESSERACT] version=%s, path=%s", _tess_version, pytesseract.pytesseract.tesseract_cmd)
+    logger.info("[TESSERACT] version=%s, path=%s", _tess_version, _tesseract_cmd)
 except Exception as exc:
     logger.warning("[TESSERACT] initialization failed: %s", exc)
 
@@ -108,15 +112,24 @@ def _extract_text_pdfplumber(data: bytes) -> tuple[str, list[dict]]:
     return _clean_text("\n\n".join(parts)), pages
 
 
+_PADDLE_LOCK = threading.Lock()
+
+
 def _get_paddle_ocr():
     global _PADDLE_OCR, _PADDLE_OCR_INIT_FAILED
+    if _PADDLE_OCR is not None:
+        return _PADDLE_OCR
     if PaddleOCR is None:
         logger.warning("PaddleOCR import unavailable; falling back to pytesseract OCR.")
-        print("PaddleOCR import unavailable; falling back to pytesseract OCR.")
         return None
     if _PADDLE_OCR_INIT_FAILED:
         return None
-    if _PADDLE_OCR is None:
+    with _PADDLE_LOCK:
+        # Double-check after acquiring lock
+        if _PADDLE_OCR is not None:
+            return _PADDLE_OCR
+        if _PADDLE_OCR_INIT_FAILED:
+            return None
         init_signature = signature(PaddleOCR.__init__)
         base_kwargs = {"lang": "en"}
         if "use_doc_orientation_classify" in init_signature.parameters:
@@ -152,7 +165,7 @@ def _get_paddle_ocr():
         if _PADDLE_OCR is None:
             _PADDLE_OCR_INIT_FAILED = True
             logger.error("PaddleOCR initialization failed after compatibility fallbacks: %s", last_exc)
-            print(f"PaddleOCR initialization failed: {last_exc}")
+            logger.warning("PaddleOCR initialization failed: %s", last_exc)
             return None
     return _PADDLE_OCR
 
@@ -465,6 +478,8 @@ def _ensure_debug_dir() -> Path:
 
 
 def _save_debug_image(image, batch_id: str, page_number: int, stage: str) -> None:
+    if not _OCR_DEBUG:
+        return
     try:
         debug_dir = _ensure_debug_dir()
         output_path = debug_dir / f"{batch_id}_page_{page_number:02d}_{stage}.png"
@@ -474,7 +489,7 @@ def _save_debug_image(image, batch_id: str, page_number: int, stage: str) -> Non
         if cv2 is not None and isinstance(image, np.ndarray):
             cv2.imwrite(str(output_path), image)
             return
-    except Exception as exc:  # pragma: no cover - best effort diagnostics
+    except Exception as exc:
         logger.warning("Failed to save debug image for stage=%s page=%d: %s", stage, page_number, exc)
 
 
@@ -577,6 +592,31 @@ def _deskew_image(image: np.ndarray) -> np.ndarray:
     )
 
 
+def _correct_orientation(image: np.ndarray, page_number: int, batch_id: str) -> np.ndarray:
+    try:
+        # Convert to PIL Image for pytesseract
+        pil_img = Image.fromarray(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
+        osd = pytesseract.image_to_osd(pil_img)
+        logger.info("[ORIENTATION] Page %d OSD: %s", page_number, osd.replace("\n", " | "))
+        
+        # Search for Rotate: <angle>
+        match = re.search(r"Rotate:\s*(\d+)", osd)
+        if match:
+            angle = int(match.group(1))
+            if angle == 90:
+                logger.info("[ORIENTATION] Page %d rotating 90 deg clockwise", page_number)
+                return cv2.rotate(image, cv2.ROTATE_90_CLOCKWISE)
+            elif angle == 180:
+                logger.info("[ORIENTATION] Page %d rotating 180 deg", page_number)
+                return cv2.rotate(image, cv2.ROTATE_180)
+            elif angle == 270:
+                logger.info("[ORIENTATION] Page %d rotating 270 deg clockwise", page_number)
+                return cv2.rotate(image, cv2.ROTATE_90_COUNTERCLOCKWISE)
+    except Exception as exc:
+        logger.debug("[ORIENTATION] Page %d orientation check failed/skipped: %s", page_number, exc)
+    return image
+
+
 def _preprocess_for_ocr(image: Image.Image, page_number: int, batch_id: str) -> Image.Image:
     _save_debug_image(image, batch_id, page_number, "original")
 
@@ -592,6 +632,7 @@ def _preprocess_for_ocr(image: Image.Image, page_number: int, batch_id: str) -> 
         return resized
 
     cv_image = cv2.cvtColor(np.array(image.convert("RGB")), cv2.COLOR_RGB2BGR)
+    cv_image = _correct_orientation(cv_image, page_number, batch_id)
     cv_image = _resize_long_edge(cv_image)
     cv_image = _crop_main_document_region(cv_image)
     cv_image = _crop_text_region(cv_image)
@@ -1050,7 +1091,11 @@ def _extract_text_ocr(data: bytes) -> tuple[str, list[dict], str]:
     text_parts: list[str] = []
     engine_used = "pytesseract"
     batch_id = uuid4().hex[:12]
-    pdf = pdfium.PdfDocument(BytesIO(data), autoclose=True)
+    try:
+        pdf = pdfium.PdfDocument(BytesIO(data), autoclose=True)
+    except Exception as exc:
+        logger.error("Failed to open PDF for OCR: %s", exc)
+        return "", [], "none"
     scale = 300 / 72
 
     try:
@@ -1062,10 +1107,23 @@ def _extract_text_ocr(data: bytes) -> tuple[str, list[dict], str]:
                 processed = _preprocess_for_ocr(pil_image, index + 1, batch_id)
 
                 page_text, confidence = _ocr_page_with_paddle(processed)
+                
+                # Dynamic Adaptive Fallback: check if the PaddleOCR output is sparse, coordinate-heavy,
+                # or has extremely low average confidence. If so, fall back to Tesseract OCR.
+                is_low_quality = False
                 if page_text:
+                    if _looks_like_coordinate_text(page_text):
+                        is_low_quality = True
+                    elif confidence is not None and 0.0 < confidence < 0.50:
+                        is_low_quality = True
+                    elif len(page_text.strip()) > 10 and not re.search(r"[A-Za-z]", page_text):
+                        is_low_quality = True
+
+                if page_text and not is_low_quality:
                     engine = "paddleocr"
                     engine_used = "paddleocr"
                 else:
+                    logger.warning("[OCR-FALLBACK] PaddleOCR page text failed quality check (is_low_quality=%s); falling back to Tesseract.", is_low_quality)
                     page_text, confidence = _ocr_page_with_tesseract(processed)
                     engine = "pytesseract"
 
@@ -1122,6 +1180,17 @@ def extract_pdf_content(file_bytes: bytes) -> dict:
     data = bytes(file_bytes)
     detection = detect_pdf_type(data)
     logger.info("CALL CHAIN OCR detect_pdf_type -> pdf_type=%s", detection.get("pdf_type"))
+
+    if detection["pdf_type"] == "encrypted":
+        return {
+            "text": "",
+            "pages": [],
+            "pdf_type": "encrypted",
+            "engine": "none",
+            "confidence": 0.0,
+            "detection": detection,
+            "error": "PDF is encrypted or password-protected",
+        }
 
     direct_text = ""
     direct_pages: list[dict] = []

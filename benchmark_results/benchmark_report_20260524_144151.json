@@ -1,0 +1,164 @@
+{
+  "timestamp": "2026-05-24T14:41:51.686090",
+  "summary": {
+    "total_scenarios": 8,
+    "average_quantity_accuracy": 56.25,
+    "average_price_accuracy": 43.75,
+    "average_discrepancy_accuracy": 62.5,
+    "fallback_activation_rate_pct": 75.0,
+    "avg_ocr_latency_ms": 9335.26,
+    "avg_parser_latency_ms": 6.14,
+    "avg_reconciliation_latency_ms": 15.1,
+    "avg_total_request_latency_ms": 27.32
+  },
+  "details": [
+    {
+      "scenario_id": "clean_digital",
+      "category": "Clean Digital PDF",
+      "latency_parser_ms": 11.29,
+      "latency_reconciliation_ms": 9.5,
+      "total_request_time_ms": 32.08,
+      "fallback_triggered": true,
+      "confidence_flags": [
+        "OCR_FALLBACK_TRIGGERED"
+      ],
+      "quantity_accuracy": 100.0,
+      "price_accuracy": 100.0,
+      "discrepancy_accuracy": 100.0,
+      "parsed_items_count": 5,
+      "expected_items_count": 4,
+      "actual_discrepancies_count": 0,
+      "expected_discrepancies_count": 0
+    },
+    {
+      "scenario_id": "scanned_invoice",
+      "category": "Scanned Invoice (Corrupted)",
+      "latency_parser_ms": 11.84,
+      "latency_reconciliation_ms": 60.43,
+      "total_request_time_ms": 84.11,
+      "fallback_triggered": true,
+      "confidence_flags": [
+        "OCR_FALLBACK_TRIGGERED",
+        "MATHEMATICAL_RECONSTRUCTION_USED",
+        "LOW_MATCH_CONFIDENCE"
+      ],
+      "quantity_accuracy": 0.0,
+      "price_accuracy": 0.0,
+      "discrepancy_accuracy": 0.0,
+      "parsed_items_count": 5,
+      "expected_items_count": 4,
+      "actual_discrepancies_count": 10,
+      "expected_discrepancies_count": 0
+    },
+    {
+      "scenario_id": "blurry_scan",
+      "category": "Blurry Scan",
+      "latency_parser_ms": 4.39,
+      "latency_reconciliation_ms": 12.49,
+      "total_request_time_ms": 21.27,
+      "fallback_triggered": true,
+      "confidence_flags": [
+        "OCR_FALLBACK_TRIGGERED",
+        "MATHEMATICAL_RECONSTRUCTION_USED",
+        "LOW_MATCH_CONFIDENCE"
+      ],
+      "quantity_accuracy": 50.0,
+      "price_accuracy": 50.0,
+      "discrepancy_accuracy": 0.0,
+      "parsed_items_count": 3,
+      "expected_items_count": 2,
+      "actual_discrepancies_count": 4,
+      "expected_discrepancies_count": 2
+    },
+    {
+      "scenario_id": "gst_heavy",
+      "category": "GST-Heavy Invoice",
+      "latency_parser_ms": 13.66,
+      "latency_reconciliation_ms": 21.5,
+      "total_request_time_ms": 48.82,
+      "fallback_triggered": true,
+      "confidence_flags": [
+        "OCR_FALLBACK_TRIGGERED",
+        "POSSIBLE_COLUMN_SHIFT"
+      ],
+      "quantity_accuracy": 100.0,
+      "price_accuracy": 0.0,
+      "discrepancy_accuracy": 100.0,
+      "parsed_items_count": 4,
+      "expected_items_count": 3,
+      "actual_discrepancies_count": 0,
+      "expected_discrepancies_count": 0
+    },
+    {
+      "scenario_id": "duplicate_items",
+      "category": "Duplicate Item Invoice",
+      "latency_parser_ms": 4.73,
+      "latency_reconciliation_ms": 10.05,
+      "total_request_time_ms": 19.51,
+      "fallback_triggered": true,
+      "confidence_flags": [
+        "OCR_FALLBACK_TRIGGERED",
+        "MATHEMATICAL_RECONSTRUCTION_USED",
+        "LOW_MATCH_CONFIDENCE"
+      ],
+      "quantity_accuracy": 100.0,
+      "price_accuracy": 100.0,
+      "discrepancy_accuracy": 0.0,
+      "parsed_items_count": 3,
+      "expected_items_count": 2,
+      "actual_discrepancies_count": 5,
+      "expected_discrepancies_count": 1
+    },
+    {
+      "scenario_id": "missing_items",
+      "category": "Missing Item Case",
+      "latency_parser_ms": 2.89,
+      "latency_reconciliation_ms": 6.62,
+      "total_request_time_ms": 12.41,
+      "fallback_triggered": true,
+      "confidence_flags": [
+        "OCR_FALLBACK_TRIGGERED",
+        "MATHEMATICAL_RECONSTRUCTION_USED"
+      ],
+      "quantity_accuracy": 100.0,
+      "price_accuracy": 100.0,
+      "discrepancy_accuracy": 100.0,
+      "parsed_items_count": 2,
+      "expected_items_count": 2,
+      "actual_discrepancies_count": 2,
+      "expected_discrepancies_count": 2
+    },
+    {
+      "scenario_id": "malformed_empty",
+      "category": "Malformed Empty OCR",
+      "latency_parser_ms": 0.04,
+      "latency_reconciliation_ms": 0.1,
+      "total_request_time_ms": 0.09,
+      "fallback_triggered": false,
+      "confidence_flags": [],
+      "quantity_accuracy": 0.0,
+      "price_accuracy": 0.0,
+      "discrepancy_accuracy": 100.0,
+      "parsed_items_count": 0,
+      "expected_items_count": 0,
+      "actual_discrepancies_count": 0,
+      "expected_discrepancies_count": 0
+    },
+    {
+      "scenario_id": "too_short",
+      "category": "Malformed Too Short",
+      "latency_parser_ms": 0.26,
+      "latency_reconciliation_ms": 0.1,
+      "total_request_time_ms": 0.29,
+      "fallback_triggered": false,
+      "confidence_flags": [],
+      "quantity_accuracy": 0.0,
+      "price_accuracy": 0.0,
+      "discrepancy_accuracy": 100.0,
+      "parsed_items_count": 0,
+      "expected_items_count": 0,
+      "actual_discrepancies_count": 0,
+      "expected_discrepancies_count": 0
+    }
+  ]
+}

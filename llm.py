@@ -21,6 +21,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import time
 
 import parser as parser_module
 from parser import normalize_currency_value, normalize_item_name, normalize_quantity
@@ -315,6 +316,32 @@ def _value_mismatch(
 # Core comparison — with fuzzy reconciliation injected
 # ---------------------------------------------------------------------------
 
+def _is_suspicious_trailing_drift(val1: float, val2: float) -> bool:
+    """Detect suspicious trailing digit OCR corruptions like 1500 -> 1509 or 5000 -> 5099.
+    
+    Checks if the difference is characteristic of a misread trailing digit (e.g. 9, 8, 99, 98),
+    or if rounding both numbers to their nearest tens/hundreds makes them align perfectly.
+    """
+    try:
+        v1 = float(val1)
+        v2 = float(val2)
+        diff = abs(v1 - v2)
+        
+        # If difference matches a single/double trailing digit noise pattern
+        if diff in (1, 2, 8, 9, 18, 19, 98, 99):
+            return True
+            
+        # Check trailing digit rounding alignability (e.g. 1500 vs 1509, 5000 vs 5099)
+        for base in (10, 100):
+            r1 = round(v1 / base) * base
+            r2 = round(v2 / base) * base
+            if r1 == r2 and (v1 % base in (0, 9, 8, 99, 98) or v2 % base in (0, 9, 8, 99, 98)):
+                return True
+    except (ValueError, TypeError):
+        pass
+    return False
+
+
 def _compare_groups(
     invoice_groups: dict[str, dict],
     po_groups: dict[str, dict],
@@ -367,9 +394,27 @@ def _compare_groups(
         po_qty      = po_bucket["qty"]  if po_bucket["qty_values"]  else None
 
         if invoice_qty is not None and po_qty is not None and invoice_qty != po_qty:
-            discrepancies.append(
-                _value_mismatch(display_name, "quantity_mismatch", invoice_qty, po_qty)
-            )
+            is_noise = False
+            diff = abs(invoice_qty - po_qty)
+            
+            # Check trailing digit drift (e.g. 1500 vs 1509)
+            if _is_suspicious_trailing_drift(invoice_qty, po_qty):
+                is_noise = True
+                
+            if is_noise:
+                logger.info("[SUPPRESS-QUANTITY] Suppressing trailing digit/OCR noise discrepancy for %r: invoice=%r po=%r", display_name, invoice_qty, po_qty)
+                if diff <= 1:
+                    continue  # Suppress completely
+                else:
+                    disc = _value_mismatch(display_name, "quantity_mismatch", invoice_qty, po_qty)
+                    disc["review_required"] = True
+                    disc["status"] = "REVIEW_REQUIRED"
+                    disc["issue"] = "quantity mismatch (probable OCR noise)"
+                    discrepancies.append(disc)
+            else:
+                discrepancies.append(
+                    _value_mismatch(display_name, "quantity_mismatch", invoice_qty, po_qty)
+                )
 
         invoice_price = inv_bucket.get("price")
         po_price      = po_bucket.get("price")
@@ -377,9 +422,26 @@ def _compare_groups(
         if invoice_price is not None and po_price is not None:
             if invoice_price != po_price:
                 if not _prices_within_tolerance(invoice_price, po_price):
-                    discrepancies.append(
-                        _value_mismatch(display_name, "price_mismatch", invoice_price, po_price)
-                    )
+                    is_noise = False
+                    diff = abs(invoice_price - po_price)
+                    
+                    if _is_suspicious_trailing_drift(invoice_price, po_price):
+                        is_noise = True
+                        
+                    if is_noise:
+                        logger.info("[SUPPRESS-PRICE] Suppressing price discrepancy for %r: invoice=%r po=%r", display_name, invoice_price, po_price)
+                        if diff <= 1.0 or diff / max(invoice_price, po_price) < 0.01:
+                            continue  # Suppress completely
+                        else:
+                            disc = _value_mismatch(display_name, "price_mismatch", invoice_price, po_price)
+                            disc["review_required"] = True
+                            disc["status"] = "REVIEW_REQUIRED"
+                            disc["issue"] = "price mismatch (probable OCR noise)"
+                            discrepancies.append(disc)
+                    else:
+                        discrepancies.append(
+                            _value_mismatch(display_name, "price_mismatch", invoice_price, po_price)
+                        )
 
     # --- Phase 3: true missing items ---
     truly_missing_inv = [k for k in unmatched_inv if k not in fuzzy_matched_inv]
@@ -406,7 +468,108 @@ def _compare_groups(
 # Public entry point
 # ---------------------------------------------------------------------------
 
+def log_failure_case(invoice_text: str, po_text: str, comparison: dict):
+    """Safe failure logging (categorizes failure types, stores previews securely)."""
+    try:
+        import json
+        from uuid import uuid4
+        from datetime import datetime
+
+        discrepancies = comparison.get("discrepancies", [])
+        error = comparison.get("error")
+        warning = comparison.get("warning")
+        
+        category = "unknown_failure"
+        if error:
+            category = "execution_error"
+        elif not comparison.get("invoice_items") and not comparison.get("po_items"):
+            category = "extraction_failed"
+        elif len(discrepancies) > 0:
+            category = "reconciliation_mismatches"
+        elif warning:
+            category = "partial_extraction"
+        else:
+            return # Everything is completely correct; no mismatch or warning
+
+        # Expand detailed failure modes to reusable diagnostic categories
+        diagnostic_categories = []
+        if error:
+            diagnostic_categories.append("execution_error")
+        if not comparison.get("invoice_items") and not comparison.get("po_items"):
+            diagnostic_categories.append("extraction_failed")
+            
+        confidence_flags = comparison.get("confidence_flags", [])
+        if "LOW_CONFIDENCE_OCR" in confidence_flags or "OCR_FALLBACK_TRIGGERED" in confidence_flags:
+            diagnostic_categories.append("ocr_corruption_patterns")
+        if "POSSIBLE_COLUMN_SHIFT" in confidence_flags:
+            diagnostic_categories.append("parser_instability")
+        if "MATHEMATICAL_RECONSTRUCTION_USED" in confidence_flags:
+            # Check if discrepancies exist on reconstructed items
+            has_recon_disc = any(
+                d.get("item") in [it.get("item") for it in comparison.get("invoice_items", []) + comparison.get("po_items", []) if it.get("reconstructed")]
+                for d in discrepancies
+            )
+            if has_recon_disc:
+                diagnostic_categories.append("reconstruction_overreach")
+        if "LOW_MATCH_CONFIDENCE" in confidence_flags:
+            diagnostic_categories.append("fuzzy_matching_uncertainty")
+            
+        # Check for GST extraction failures (if item name contains CGST/SGST/IGST/VAT/tax/total)
+        has_gst_item = any(
+            any(k in str(item.get("item", "")).lower() for k in ("cgst", "sgst", "igst", "utgst", "vat", "gst", "tax", "total", "subtotal"))
+            for item in comparison.get("invoice_items", []) + comparison.get("po_items", [])
+        )
+        if has_gst_item:
+            diagnostic_categories.append("gst_tax_contamination")
+            
+        # Check for numeric drift patterns (suspicious trailing digits or tiny differences)
+        has_drift = False
+        for d in discrepancies:
+            inv_val = d.get("invoice_qty") or d.get("invoice_price")
+            po_val = d.get("po_qty") or d.get("po_price")
+            if inv_val is not None and po_val is not None:
+                if _is_suspicious_trailing_drift(inv_val, po_val):
+                    has_drift = True
+                    break
+        if has_drift:
+            diagnostic_categories.append("numeric_drift_patterns")
+
+        # Ensure directory exists within workspace
+        failure_dir = os.path.join("logs", "failures")
+        os.makedirs(failure_dir, exist_ok=True)
+        
+        failure_id = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid4().hex[:8]}"
+        filename = os.path.join(failure_dir, f"failure_{failure_id}.json")
+        
+        payload = {
+            "failure_id": failure_id,
+            "timestamp": datetime.now().isoformat(),
+            "category": category,
+            "diagnostic_categories": diagnostic_categories,
+            "error": error,
+            "warning": warning,
+            "invoice_text_length": len(invoice_text),
+            "po_text_length": len(po_text),
+            "invoice_item_count": len(comparison.get("invoice_items", [])),
+            "po_item_count": len(comparison.get("po_items", [])),
+            "discrepancies": discrepancies,
+            "invoice_parser": comparison.get("invoice_parser", {}),
+            "po_parser": comparison.get("po_parser", {}),
+            "confidence_flags": confidence_flags,
+            "invoice_text_preview": (invoice_text or "")[:1000],
+            "po_text_preview": (po_text or "")[:1000]
+        }
+        
+        with open(filename, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2, ensure_ascii=False)
+            
+        logger.info("[FAILURE-ANALYTICS] Saved extraction failure log to %s | diagnostics=%s", filename, diagnostic_categories)
+    except Exception as exc:
+        logger.warning("[FAILURE-ANALYTICS] Failed to write failure log: %s", exc)
+
+
 def compare_invoice_po(invoice_text: str, po_text: str) -> dict:
+    t_start = time.perf_counter()
     logger.info("CALL CHAIN discrepancy entrypoint=compare_invoice_po")
 
     if len(invoice_text.strip()) < _MIN_TEXT_LEN:
@@ -425,10 +588,17 @@ def compare_invoice_po(invoice_text: str, po_text: str) -> dict:
         logger.error(msg)
         return {"discrepancies": [], "summary": "", "error": msg, "invoice_items": [], "po_items": []}
 
-    logger.info("CALL CHAIN compare_invoice_po -> extract_structured(invoice_text)")
+    # 1. Invoice extraction timing
+    t_inv_start = time.perf_counter()
     invoice_result = extract_structured(invoice_text, doc_hint="invoice")
-    logger.info("CALL CHAIN compare_invoice_po -> extract_structured(po_text)")
+    t_inv_end = time.perf_counter()
+    inv_latency = (t_inv_end - t_inv_start) * 1000
+
+    # 2. PO extraction timing
+    t_po_start = time.perf_counter()
     po_result      = extract_structured(po_text,      doc_hint="po")
+    t_po_end = time.perf_counter()
+    po_latency = (t_po_end - t_po_start) * 1000
 
     invoice_items = invoice_result.get("items", [])
     po_items      = po_result.get("items",      [])
@@ -503,7 +673,11 @@ def compare_invoice_po(invoice_text: str, po_text: str) -> dict:
             invoice_parser.get("failure_reason"),
             po_parser.get("failure_reason"),
         )
-        return {
+        confidence_flags = ["LOW_CONFIDENCE_OCR"]
+        if invoice_result.get("fallback_used", False) or po_result.get("fallback_used", False):
+            confidence_flags.append("OCR_FALLBACK_TRIGGERED")
+            
+        result_payload = {
             "discrepancies":    [],
             "summary":          "",
             "error":            msg,
@@ -514,7 +688,10 @@ def compare_invoice_po(invoice_text: str, po_text: str) -> dict:
             "invoice_parser":   invoice_parser,
             "po_parser":        po_parser,
             "failure_path":     failure_path,
+            "confidence_flags": confidence_flags,
         }
+        log_failure_case(invoice_text, po_text, result_payload)
+        return result_payload
 
     warning = None
     if not invoice_items and po_items:
@@ -530,10 +707,10 @@ def compare_invoice_po(invoice_text: str, po_text: str) -> dict:
         )
         logger.warning("%s failure_path=llm.compare_invoice_po.partial_po_parse", warning)
 
+    t_recon_start = time.perf_counter()
     invoice_groups = _group_items(invoice_items)
     po_groups      = _group_items(po_items)
 
-    # Duplicate detection (unchanged)
     discrepancies: list[dict] = []
     for item, bucket in invoice_groups.items():
         if bucket["has_duplicate"]:
@@ -542,16 +719,56 @@ def compare_invoice_po(invoice_text: str, po_text: str) -> dict:
         if bucket["has_duplicate"]:
             discrepancies.append(_duplicate_discrepancy(item, bucket["entries"], "PO"))
 
-    # Fuzzy-aware comparison
     discrepancies.extend(_compare_groups(invoice_groups, po_groups))
+    t_recon_end = time.perf_counter()
+    recon_latency = (t_recon_end - t_recon_start) * 1000
 
-    logger.info("Detected mismatches: %s", discrepancies)
+    total_latency = (time.perf_counter() - t_start) * 1000
+
+    # Structured logging of timings
     logger.info(
-        "CALL CHAIN compare_invoice_po -> discrepancy engine complete mismatches=%d",
-        len(discrepancies),
+        "[TIMING] Stage timing latency breakdown:\n"
+        "  - Invoice Extraction (parser path & timing): %.2f ms\n"
+        "  - PO Extraction (parser path & timing): %.2f ms\n"
+        "  - Reconciliation Engine: %.2f ms\n"
+        "  - Total End-to-End Pipeline: %.2f ms",
+        inv_latency, po_latency, recon_latency, total_latency
     )
 
-    return {
+    # ------------------------------------------------------------------
+    # PHASE 3 — CONFIDENCE VALIDATION LAYER
+    # ------------------------------------------------------------------
+    confidence_flags = []
+
+    # 1. OCR Confidence signaling
+    inv_conf = invoice_result.get("extraction_confidence", 1.0)
+    po_conf = po_result.get("extraction_confidence", 1.0)
+    if inv_conf < 0.65 or po_conf < 0.65:
+        confidence_flags.append("LOW_CONFIDENCE_OCR")
+
+    # 2. OCR Fallback Trigger signaling
+    if invoice_result.get("fallback_used", False) or po_result.get("fallback_used", False):
+        confidence_flags.append("OCR_FALLBACK_TRIGGERED")
+
+    # 3. Column Shift & Parser signaling
+    has_swap = any(item.get("swapped", False) for item in invoice_items + po_items)
+    # Check if we have mismatched values that suggest a possible column shift
+    if has_swap or invoice_parser.get("parser_confidence_score", 1.0) < 0.65 or po_parser.get("parser_confidence_score", 1.0) < 0.65:
+        confidence_flags.append("POSSIBLE_COLUMN_SHIFT")
+
+    # 4. Reconstruction signaling
+    has_reconstruct = any(item.get("reconstructed", False) for item in invoice_items + po_items)
+    if has_reconstruct:
+        confidence_flags.append("MATHEMATICAL_RECONSTRUCTION_USED")
+
+    # 5. Reconciliation Match signaling
+    total_distinct_items = max(len(invoice_groups), 1) + max(len(po_groups), 1)
+    unmatched_count = len(invoice_groups.keys() - po_groups.keys()) + len(po_groups.keys() - invoice_groups.keys())
+    # If more than 35% of distinct items couldn't be matched
+    if unmatched_count / total_distinct_items > 0.35 or len(discrepancies) > 2:
+        confidence_flags.append("LOW_MATCH_CONFIDENCE")
+
+    result_payload = {
         "discrepancies": discrepancies,
         "summary": (
             f"{len(discrepancies)} discrepancy(s) found."
@@ -565,4 +782,12 @@ def compare_invoice_po(invoice_text: str, po_text: str) -> dict:
         "po_totals":      po_doc.get("totals", {}),
         "invoice_parser": invoice_parser,
         "po_parser":      po_parser,
+        "confidence_flags": confidence_flags,
     }
+
+    # ------------------------------------------------------------------
+    # PHASE 4 — FAILURE ANALYTICS LOGGING
+    # ------------------------------------------------------------------
+    log_failure_case(invoice_text, po_text, result_payload)
+
+    return result_payload

@@ -87,6 +87,53 @@ def normalize_ocr_text(value: object) -> str:
     return text.strip()
 
 
+def clean_ocr_numeric_token(text: str) -> str:
+    if not text:
+        return text
+    t = text.strip()
+    
+    # If the token is purely alphabetical (contains only letters) and has no digits or punctuation,
+    # then it is a text word, not a number! (e.g. "is", "so", "lo").
+    has_digit = any(c.isdigit() for c in t)
+    has_numeric_symbol = any(c in ".,-%$" for c in t)
+    if not has_digit and not has_numeric_symbol:
+        return t
+
+    # If the token contains any alphabetical character that is not a numeric homoglyph (not in oilszgb), 
+    # then it is a text word rather than a number. We should NOT clean it or treat it as numeric!
+    has_non_homoglyph_letters = any(c.isalpha() and c.lower() not in "oilszgb" for c in t)
+    if has_non_homoglyph_letters:
+        return t
+
+    # Check if the token is a candidate for homoglyph translation.
+    # It must contain at least one digit or be composed entirely of digits/letters/symbols 
+    # that are common OCR misreads (e.g. l, i, o, O, I, |, !, s, S, z, Z, g, b) plus commas/periods/percent/currency signs.
+    is_numeric_homoglyph = all(c.isdigit() or c.lower() in "oilszgb.,%-$ \t|!" for c in t)
+    
+    if has_digit or is_numeric_homoglyph:
+        # Create a translation table mapping lowercase letters to their numeric equivalents
+        translation = {
+            'o': '0',
+            'i': '1',
+            'l': '1',
+            '|': '1',
+            '!': '1',
+            's': '5',
+            'z': '2',
+            'g': '9',
+            'b': '8'
+        }
+        chars = []
+        for char in t:
+            cl = char.lower()
+            if cl in translation:
+                chars.append(translation[cl])
+            else:
+                chars.append(char)
+        return "".join(chars)
+    return t
+
+
 def normalize_currency_value(value: object) -> float | int | None:
     """Parse a single numeric token into a Python int or float.
 
@@ -109,7 +156,20 @@ def normalize_currency_value(value: object) -> float | int | None:
     if not text:
         return None
 
+    # Remove currency prefixes first to prevent their letters (e.g. 's' in 'Rs.', 'i' in 'INR') from being translated as digits
     text = re.sub(r"(?i)\b(?:rs|inr)\.?\s*", "", text)
+
+    # If the token is purely alphabetical and has no digits or symbols, reject it
+    has_digit = any(c.isdigit() for c in text)
+    has_numeric_symbol = any(c in ".,-%$" for c in text)
+    if not has_digit and not has_numeric_symbol:
+        return None
+
+    # If the token contains non-homoglyph alphabet characters (e.g. "Lapt0p", "M0use"), it is a text word, not a number!
+    if any(c.isalpha() and c.lower() not in "oilszgb" for c in text):
+        return None
+
+    text = clean_ocr_numeric_token(text)
     # Remove commas used as thousands separators, including any surrounding
     # whitespace strictly adjacent to a comma digit group
     # e.g. "1,500" -> "1500",  "1, 500" -> "1500", but "6 5000" -> kept as-is

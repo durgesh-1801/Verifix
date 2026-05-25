@@ -137,7 +137,8 @@ def _call_groq(system: str, user: str) -> str:
             {"role": "user",   "content": user},
         ],
         temperature=0.0,
-        max_tokens=1024,
+        max_tokens=2048,
+        timeout=30,
     )
     elapsed = round(time.time() - t0, 2)
     raw = response.choices[0].message.content or ""
@@ -164,7 +165,15 @@ def _call_gemini(system: str, user: str) -> str:
         system_instruction=system,
     )
     t0 = time.time()
-    response = model.generate_content(user)
+    try:
+        response = model.generate_content(
+            user,
+            request_options={"timeout": 30},
+        )
+    except Exception as exc:
+        if time.time() - t0 > 25:
+            raise TimeoutError(f"Gemini call timed out after {time.time()-t0:.1f}s") from exc
+        raise
     elapsed = round(time.time() - t0, 2)
     raw = response.text or ""
     logger.info(
@@ -193,7 +202,8 @@ def _call_openai(system: str, user: str) -> str:
             {"role": "user",   "content": user},
         ],
         temperature=0.0,
-        max_tokens=1024,
+        max_tokens=2048,
+        timeout=30,
     )
     elapsed = round(time.time() - t0, 2)
     raw = response.choices[0].message.content or ""
@@ -218,9 +228,10 @@ def _call_anthropic(system: str, user: str) -> str:
     t0 = time.time()
     message = client.messages.create(
         model=_ANTHROPIC_MODEL,
-        max_tokens=1024,
+        max_tokens=2048,
         system=system,
         messages=[{"role": "user", "content": user}],
+        timeout=30,
     )
     elapsed = round(time.time() - t0, 2)
     raw = message.content[0].text if message.content else ""
@@ -241,17 +252,42 @@ _PROVIDER_DISPATCH: dict[str, Any] = {
 }
 
 
+_FALLBACK_ORDER = ["groq", "gemini", "openai", "anthropic"]
+
+
 def _call_provider(system: str, user: str) -> str:
-    """Dispatch to the configured provider; raise on failure."""
-    provider = _LLM_PROVIDER
-    call_fn = _PROVIDER_DISPATCH.get(provider)
-    if call_fn is None:
-        raise RuntimeError(
-            f"Unknown LLM_PROVIDER={provider!r}. "
-            f"Valid values: {list(_PROVIDER_DISPATCH)}"
-        )
-    logger.info("[LLM-EXTRACT] dispatching to provider=%s", provider)
-    return call_fn(system, user)
+    """Dispatch to the configured provider with fallback chain.
+
+    Tries the primary provider first. If it fails, tries remaining
+    providers in order. Raises RuntimeError only if ALL providers fail.
+    """
+    primary = _LLM_PROVIDER
+    order = [primary] + [p for p in _FALLBACK_ORDER if p != primary]
+    errors: list[str] = []
+
+    for provider in order:
+        call_fn = _PROVIDER_DISPATCH.get(provider)
+        if call_fn is None:
+            continue
+        try:
+            logger.info("[LLM-EXTRACT] attempting provider=%s", provider)
+            result = call_fn(system, user)
+            if provider != primary:
+                logger.warning(
+                    "[LLM-EXTRACT] primary provider %s failed; succeeded with fallback %s",
+                    primary, provider,
+                )
+            return result
+        except Exception as exc:
+            errors.append(f"{provider}: {type(exc).__name__}: {exc}")
+            logger.warning(
+                "[LLM-EXTRACT] provider %s failed: %s: %s",
+                provider, type(exc).__name__, exc,
+            )
+
+    raise RuntimeError(
+        f"All LLM providers failed. Errors: {'; '.join(errors)}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -273,7 +309,10 @@ def _safe_number(value: Any) -> float | int | None:
     if isinstance(value, (int, float)):
         return value
     if isinstance(value, str):
-        cleaned = re.sub(r"[^\d.\-]", "", value.replace(",", ""))
+        # Remove currency prefixes first to prevent their decimal points/abbreviations
+        # from prepending to the number (e.g. "Rs. 5000" -> "5000" instead of ".5000")
+        cleaned_prefix = re.sub(r"(?i)\b(?:rs|inr)\.?\s*", "", value)
+        cleaned = re.sub(r"[^\d.\-]", "", cleaned_prefix.replace(",", ""))
         try:
             n = float(cleaned)
             return int(n) if n.is_integer() else round(n, 2)
@@ -557,6 +596,16 @@ def _parse_llm_response(raw: str) -> dict:
             except json.JSONDecodeError as exc:
                 raise ValueError(f"Could not decode JSON from LLM response: {exc}") from exc
         else:
+            # Try JSON array fallback (some LLMs wrap items in an array)
+            array_match = re.search(r"\[.*\]", cleaned, re.DOTALL)
+            if array_match:
+                try:
+                    items = json.loads(array_match.group(0))
+                    if isinstance(items, list):
+                        logger.info("[LLM-EXTRACT] Recovered items from JSON array fallback")
+                        return {"items": items}
+                except json.JSONDecodeError:
+                    pass
             raise ValueError("No JSON object found in LLM response")
 
     if not isinstance(payload, dict):

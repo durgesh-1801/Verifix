@@ -35,7 +35,7 @@ _DOCUMENT_TOTAL_PATTERN = re.compile(
 )
 _ROW_START_PATTERN = re.compile(r"(?i)^\s*(?:[-*]|(?:\d+\s*[.)-]))\s*")
 _KEYWORD_PATTERN = re.compile(r"(?i)\b(?:qty|quantity|qnty|price|rate|amount|tax|gst|vat|total)\b")
-_NUMBER_PATTERN = re.compile(r"(?<![A-Za-z])(?:rs\.?\s*)?\d+(?:[.,]\d+)?\s*%?")
+_NUMBER_PATTERN = re.compile(r"(?<![A-Za-z])(?:rs\.?\s*)?[0-9oilszgb]+(?:[.,][0-9oilszgb]+)?\s*%?", re.IGNORECASE)
 _QUANTITY_MAX = 1000
 
 
@@ -64,8 +64,8 @@ def _clean_ocr_text(text: str) -> str:
     cleaned = re.sub(r"(?i)\bprice(?=\d)", "price ", cleaned)
     cleaned = re.sub(r"(?i)\brate(?=\d)", "rate ", cleaned)
     cleaned = re.sub(r"(?i)\b(?:tax|gst|vat)(?=\d)", lambda m: f"{m.group(0)} ", cleaned)
-    cleaned = re.sub(r"([A-Za-z])([0-9])", r"\1 \2", cleaned)
-    cleaned = re.sub(r"([0-9])([A-Za-z])", r"\1 \2", cleaned)
+    # cleaned = re.sub(r"([A-Za-z])([0-9])", r"\1 \2", cleaned)
+    # cleaned = re.sub(r"([0-9])([A-Za-z])", r"\1 \2", cleaned)
     cleaned = re.sub(r"(?<!\n)(\b\d+\.\s+[A-Za-z])", r"\n\1", cleaned)
     cleaned = re.sub(r"(?<!\n)(\b(?:total|grand total|total amount)\b\s*:)", r"\n\1", cleaned, flags=re.I)
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
@@ -175,13 +175,64 @@ def _extract_field(pattern_name: str, line: str):
     return match.group(1)
 
 
-def _extract_columnar_values(line: str) -> tuple[dict, float, str] | None:
-    parts = [part.strip() for part in line.split("|") if part.strip()]
+def _extract_columnar_values(line: str, header_indices: dict = None) -> tuple[dict, float, str] | None:
+    parts = [part.strip() for part in line.split("|")]
+    
+    # If dynamic header mapping is available and valid, map fields explicitly by column index
+    if header_indices and len(parts) >= max(header_indices.values()) + 1:
+        item_idx = header_indices.get("item")
+        qty_idx = header_indices.get("qty")
+        price_idx = header_indices.get("price")
+        total_idx = header_indices.get("total")
+        
+        if item_idx is not None and (qty_idx is not None or price_idx is not None or total_idx is not None):
+            item = normalize_item_name(strip_ocr_field_labels(parts[item_idx]))
+            if item:
+                parsed = {"item": item}
+                if qty_idx is not None:
+                    parsed["qty"] = normalize_quantity(parts[qty_idx])
+                if price_idx is not None:
+                    parsed["price"] = normalize_currency_value(parts[price_idx])
+                if total_idx is not None:
+                    parsed["total"] = normalize_currency_value(parts[total_idx])
+                
+                usable_fields = [key for key in ("qty", "price", "total") if parsed.get(key) is not None]
+                if usable_fields:
+                    parsed = _finalize_numeric_inference(line, parsed, PARSER_PATH_A, "_extract_columnar_values")
+                    if parsed:
+                        return parsed, 0.98, "columnar"
+
+    # Fallback to structural heuristic
+    parts = [part.strip() for part in parts if part.strip()]
     if len(parts) < 2:
         return None
 
-    item = normalize_item_name(strip_ocr_field_labels(parts[0]))
-    numeric_parts = parts[1:]
+    # Recover from merged columns or missing delimiters within parts
+    new_parts = []
+    for part in parts:
+        sub_tokens = [tok.strip() for tok in re.split(r"\s+", part) if tok.strip()]
+        if len(sub_tokens) >= 2 and all(normalize_currency_value(tok) is not None for tok in sub_tokens):
+            new_parts.extend(sub_tokens)
+        else:
+            new_parts.append(part)
+    parts = new_parts
+
+    # Improve column alignment robustness by detecting leading serial numbers
+    is_serial = False
+    if len(parts) >= 3:
+        val0 = normalize_currency_value(parts[0])
+        val1 = normalize_currency_value(parts[1])
+        if val0 is not None and val1 is None:
+            if isinstance(val0, int) and 0 < val0 <= 200:
+                is_serial = True
+
+    if is_serial:
+        item = normalize_item_name(strip_ocr_field_labels(parts[1]))
+        numeric_parts = parts[2:]
+    else:
+        item = normalize_item_name(strip_ocr_field_labels(parts[0]))
+        numeric_parts = parts[1:]
+
     values = [normalize_currency_value(part) for part in numeric_parts]
     values = [value for value in values if value is not None]
     if not item or not values:
@@ -263,7 +314,7 @@ def _log_numeric_assignment(line: str, values: list[dict], qty: object, price: o
     )
 
 
-def _choose_qty_price_tax_total(values: list[dict]) -> tuple[object, object, object, object]:
+def _choose_qty_price_tax_total(values: list[dict], line: str | None = None) -> tuple[object, object, object, object]:
     qty = None
     price = None
     tax = None
@@ -280,7 +331,18 @@ def _choose_qty_price_tax_total(values: list[dict]) -> tuple[object, object, obj
     if explicit_tax:
         tax = normalize_percentage(explicit_tax["value"])
 
-    trailing = [entry for entry in values if not entry["is_percent"]]
+    # Detect if the first numeric token is a serial number at the start of the line
+    serial_entry = None
+    if line is not None and len(values) >= 3:
+        first_val = values[0]
+        if "start" in first_val:
+            prefix = line[:first_val["start"]]
+            if not re.search(r"[A-Za-z0-9]", prefix):
+                val_num = first_val["value"]
+                if isinstance(val_num, int) and 0 < val_num <= 200:
+                    serial_entry = first_val
+
+    trailing = [entry for entry in values if not entry["is_percent"] and entry is not serial_entry]
     if len(trailing) >= 3:
         total = normalize_currency_value(trailing[-1]["value"])
 
@@ -315,6 +377,98 @@ def _choose_qty_price_tax_total(values: list[dict]) -> tuple[object, object, obj
     return qty, price, tax, total
 
 
+def _is_tax_or_subtotal_line(item_name: str) -> bool:
+    name_lower = item_name.lower().strip()
+    # Keywords that indicate a summary, subtotal, tax, or administrative line
+    tax_keywords = {
+        "cgst", "sgst", "igst", "utgst", "gst", "tax", "vat", "service tax", 
+        "subtotal", "sub-total", "grand total", "total", "round off", 
+        "rounding", "cess", "hsn", "sac", "taxable", "net amount", "total amount",
+        "discount", "handling", "shipping", "freight"
+    }
+    
+    # Clean punctuation/spaces
+    cleaned_name = re.sub(r"[^a-z0-9\s%]", " ", name_lower)
+    tokens = set(cleaned_name.split())
+    
+    # If any token matches a tax/summary keyword
+    for token in tokens:
+        if token in tax_keywords:
+            return True
+            
+    # Check if it contains percentage + tax pattern, e.g., "cgst 9%" or "sgst 9" or "gst 18"
+    if re.search(r"\b(?:cgst|sgst|igst|utgst|gst|tax|vat)\b.*\b\d+", name_lower):
+        return True
+        
+    return False
+
+
+def _apply_mathematical_consistency(parsed: dict) -> dict:
+    qty = parsed.get("qty")
+    price = parsed.get("price")
+    total = parsed.get("total")
+    tax = parsed.get("tax") or 0.0
+
+    # 1. Quantity/Price Swap Detection
+    # Only swap if they are mathematically inconsistent in original order,
+    # OR if total is missing and qty is extremely large compared to price.
+    if qty is not None and price is not None:
+        original_consistent = False
+        if total is not None:
+            calc_total = qty * price
+            calc_total_with_tax = calc_total * (1 + tax / 100.0)
+            if abs(calc_total - total) < 0.1 or abs(calc_total_with_tax - total) < 0.1:
+                original_consistent = True
+
+        if not original_consistent:
+            # Let's check if swapped order is consistent:
+            swapped_consistent = False
+            if total is not None:
+                calc_total = price * qty
+                calc_total_with_tax = calc_total * (1 + tax / 100.0)
+                if abs(calc_total - total) < 0.1 or abs(calc_total_with_tax - total) < 0.1:
+                    swapped_consistent = True
+
+            # Swap if swapped is consistent, or if total is missing and it's an obvious swap (qty > 200 and price <= 200 and qty > price)
+            if swapped_consistent or (total is None and qty > 200 and price <= 200 and qty > price):
+                parsed["qty"] = price
+                parsed["price"] = qty
+                parsed["swapped"] = True
+                qty, price = price, qty
+
+    # 2. Mathematical Field Reconstruction
+    # Case A: Qty and Price exist, but Total is missing
+    if qty is not None and price is not None and total is None:
+        subtotal = qty * price
+        parsed["total"] = round(subtotal * (1 + tax / 100.0), 2)
+        parsed["reconstructed"] = True
+        if parsed["total"].is_integer():
+            parsed["total"] = int(parsed["total"])
+
+    # Case B: Price and Total exist, but Qty is missing
+    elif qty is None and price is not None and price > 0 and total is not None:
+        calc_qty = total / price
+        if abs(calc_qty - round(calc_qty)) < 0.01 and 0 < calc_qty <= 1000:
+            parsed["qty"] = int(round(calc_qty))
+            parsed["reconstructed"] = True
+        else:
+            calc_qty = (total / (1 + tax / 100.0)) / price
+            if abs(calc_qty - round(calc_qty)) < 0.01 and 0 < calc_qty <= 1000:
+                parsed["qty"] = int(round(calc_qty))
+                parsed["reconstructed"] = True
+
+    # Case C: Qty and Total exist, but Price is missing
+    elif qty is not None and qty > 0 and price is None and total is not None:
+        calc_price = total / qty
+        calc_price_ex_tax = calc_price / (1 + tax / 100.0)
+        parsed["price"] = round(calc_price_ex_tax, 2)
+        parsed["reconstructed"] = True
+        if parsed["price"].is_integer():
+            parsed["price"] = int(parsed["price"])
+
+    return parsed
+
+
 def _finalize_numeric_inference(line: str, parsed: dict, parser_path: str, parser_function: str) -> dict | None:
     values = _numeric_matches(line)
     non_percent_values = [entry for entry in values if not entry["is_percent"]]
@@ -322,17 +476,26 @@ def _finalize_numeric_inference(line: str, parsed: dict, parser_path: str, parse
         return None
 
     item = _clean_item_name_from_numeric_tokens(line, non_percent_values) or normalize_item_name(parsed.get("item"))
-    qty, price, tax, total = _choose_qty_price_tax_total(values)
+    qty, price, tax, total = _choose_qty_price_tax_total(values, line)
     finalized = {"item": item, "qty": qty, "price": price, "tax": tax}
     if total is not None:
         finalized["total"] = total
 
+    # Prioritize values that were explicitly parsed by high-confidence structures
     for field in ("qty", "price", "tax", "total"):
-        if finalized.get(field) is None and parsed.get(field) is not None:
+        if parsed.get(field) is not None:
             finalized[field] = parsed.get(field)
 
     if not finalized.get("item"):
         return None
+
+    # Filter out tax/subtotal rows to prevent them from becoming line items
+    if _is_tax_or_subtotal_line(finalized["item"]) or _is_tax_or_subtotal_line(line):
+        logger.info("[FILTER-TAX] Excluded tax/subtotal line from items: %r (line: %r)", finalized["item"], line)
+        return None
+
+    # Apply mathematical consistency check and reconstruction
+    finalized = _apply_mathematical_consistency(finalized)
 
     _log_numeric_assignment(line, non_percent_values, finalized.get("qty"), finalized.get("price"), finalized["item"])
     logger.info(
@@ -370,7 +533,7 @@ def _extract_trailing_numeric_values(line: str) -> tuple[dict, float, str] | Non
     if not item:
         return None
 
-    qty, price, tax, total = _choose_qty_price_tax_total(values)
+    qty, price, tax, total = _choose_qty_price_tax_total(values, line)
     parsed = {"item": item, "qty": qty, "price": price, "tax": tax}
     if total is not None:
         parsed["total"] = total
@@ -417,7 +580,7 @@ def _extract_token_fallback(line: str) -> tuple[dict, float, str] | None:
     if not item:
         return None
 
-    qty, price, tax, total = _choose_qty_price_tax_total(numeric_entries)
+    qty, price, tax, total = _choose_qty_price_tax_total(numeric_entries, line)
     parsed = {"item": item, "qty": qty, "price": price, "tax": tax}
     if total is not None:
         parsed["total"] = total
@@ -435,9 +598,12 @@ _ACTIVE_ROW_EXTRACTORS = (
 )
 
 
-def _parse_candidate_line(line: str, confidence: float | None = None) -> dict | None:
+def _parse_candidate_line(line: str, confidence: float | None = None, header_indices: dict = None) -> dict | None:
     for extractor in _ACTIVE_ROW_EXTRACTORS:
-        extracted = extractor(line)
+        if extractor == _extract_columnar_values:
+            extracted = extractor(line, header_indices=header_indices)
+        else:
+            extracted = extractor(line)
         if not extracted:
             continue
         parsed, base_confidence, strategy = extracted
@@ -554,10 +720,38 @@ def extract_line_items_with_diagnostics(text: str, confidence: float | None = No
         ["_extract_token_fallback"],
     )
 
+    # Dynamic table header detection and column alignment mapping
+    header_indices = {}
+    for line in text.split("\n"):
+        if "|" in line:
+            parts = [p.strip().lower() for p in line.split("|")]
+            if any(h in parts for h in ("item", "description", "particulars", "qty", "quantity", "price", "rate", "total", "amount", "hsn", "sac")):
+                for idx, part in enumerate(parts):
+                    if not part:
+                        continue
+                    if any(k in part for k in ("item", "description", "desc", "particulars")):
+                        header_indices["item"] = idx
+                    elif any(k in part for k in ("qty", "quantity", "qnty")):
+                        header_indices["qty"] = idx
+                    elif any(k in part for k in ("price", "rate", "unit price")):
+                        if "total" not in part and "taxable" not in part:
+                            header_indices["price"] = idx
+                    elif "total" in part or "amount" in part:
+                        if "taxable" not in part:
+                            header_indices["total"] = idx
+                    elif "hsn" in part or "sac" in part:
+                        header_indices["hsn"] = idx
+                    elif "taxable" in part:
+                        header_indices["taxable"] = idx
+                    elif any(k in part for k in ("cgst", "sgst", "igst", "utgst", "gst")):
+                        header_indices["gst"] = idx
+                logger.info("[HEADER-ALIGN] Dynamic column header mapping: %s", header_indices)
+                break
+
     for entry in candidate_lines:
         raw_line = entry["raw"]
         cleaned_line = entry["cleaned"]
-        parsed = _parse_candidate_line(cleaned_line, confidence=confidence)
+        parsed = _parse_candidate_line(cleaned_line, confidence=confidence, header_indices=header_indices)
         extracted_item_name = parsed.get("item") if parsed else _extract_item_name(cleaned_line)
         logger.info(
             "Parser item extraction raw_row=%r cleaned_row=%r extracted_item_name=%r",

@@ -59,6 +59,8 @@ CORS(app, resources={
         "allow_headers": ["Content-Type", "Authorization"]
     }
 })
+print("PRODUCTION CORS CONFIG LOADED", flush=True)
+logger.info("PRODUCTION CORS CONFIG LOADED")
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024
 
 

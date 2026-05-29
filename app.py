@@ -46,7 +46,19 @@ if os.getenv("FLASK_ENV") == "development":
 
 app = Flask(__name__)
 app.secret_key = os.getenv("FLASK_SECRET_KEY", "").encode() or os.urandom(24)
-CORS(app)
+CORS(app, resources={
+    r"/*": {
+        "origins": [
+            "https://invoiceai-blond.vercel.app",
+            "http://localhost:5173",
+            "http://localhost:3000",
+            "http://127.0.0.1:5173",
+            "http://127.0.0.1:3000"
+        ],
+        "methods": ["GET", "POST", "OPTIONS"],
+        "allow_headers": ["Content-Type", "Authorization"]
+    }
+})
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024
 
 

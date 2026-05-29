@@ -1,4 +1,4 @@
-import type { ReactNode } from 'react'
+import { Link } from 'react-router-dom'
 import { LogoMark } from '../ui/LogoMark'
 import { scrollToId } from '../../lib/scroll'
 
@@ -8,18 +8,6 @@ const NAV = [
   { label: 'Pipelines', id: 'pipeline' },
   { label: 'Reports', id: 'workspace' },
 ] as const
-
-function IconButton({ label, children }: { label: string; children: ReactNode }) {
-  return (
-    <button
-      type="button"
-      aria-label={label}
-      className="flex h-9 w-9 items-center justify-center rounded-lg text-slate-500 transition hover:bg-slate-50 hover:text-slate-800"
-    >
-      {children}
-    </button>
-  )
-}
 
 export function Navbar({ onOpenWorkspace }: { onOpenWorkspace: () => void }) {
   return (
@@ -47,24 +35,19 @@ export function Navbar({ onOpenWorkspace }: { onOpenWorkspace: () => void }) {
           ))}
         </nav>
 
-        <div className="flex items-center gap-1 sm:gap-2">
-          <IconButton label="Help">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75">
-              <circle cx="12" cy="12" r="10" />
-              <path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3M12 17h.01" />
-            </svg>
-          </IconButton>
-          <IconButton label="Notifications">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75">
-              <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9M13.73 21a2 2 0 0 1-3.46 0" />
-            </svg>
-          </IconButton>
-          <IconButton label="Settings">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75">
-              <circle cx="12" cy="12" r="3" />
-              <path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42" />
-            </svg>
-          </IconButton>
+        <div className="flex items-center gap-1.5 sm:gap-2.5">
+          <Link
+            to="/login"
+            className="rounded-lg border border-gray-200 bg-white px-3 py-2 text-[10px] font-semibold tracking-wide text-[#1A1C2E] shadow-sm transition hover:bg-slate-50 hover:border-gray-300 sm:px-4 sm:text-xs"
+          >
+            LOGIN
+          </Link>
+          <Link
+            to="/signup"
+            className="rounded-lg border border-gray-200 bg-white px-3 py-2 text-[10px] font-semibold tracking-wide text-[#1A1C2E] shadow-sm transition hover:bg-slate-50 hover:border-gray-300 sm:px-4 sm:text-xs"
+          >
+            SIGNUP
+          </Link>
           <button
             type="button"
             onClick={onOpenWorkspace}

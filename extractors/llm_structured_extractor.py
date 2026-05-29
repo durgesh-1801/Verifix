@@ -529,7 +529,8 @@ def _validate_items(raw_items: Any, ocr_confidences: dict[str, float] | None = N
         )
 
         # --- qty ---
-        qty = _safe_number(entry.get("qty"))
+        raw_qty = entry.get("qty")
+        qty = _safe_number(raw_qty)
         if qty is None or qty <= 0:
             logger.debug(
                 "[LLM-EXTRACT] item[%d] (%r) skipped: invalid qty=%r",
@@ -538,13 +539,20 @@ def _validate_items(raw_items: Any, ocr_confidences: dict[str, float] | None = N
             continue
 
         # --- price ---
-        price = _safe_number(entry.get("price"))
+        raw_price = entry.get("price")
+        price = _safe_number(raw_price)
         if price is None or price < 0:
             logger.debug(
                 "[LLM-EXTRACT] item[%d] (%r) skipped: invalid price=%r",
                 idx, item_name, entry.get("price"),
             )
             continue
+
+        # Mutation tracking for quality gate coercion
+        if qty != raw_qty and raw_qty is not None:
+            print(f"[NUMERIC_MUTATION]\nstage=quality_gate_coercion\nitem={item_name}\nold_value=qty:{raw_qty}\nnew_value=qty:{qty}", flush=True)
+        if price != raw_price and raw_price is not None:
+            print(f"[NUMERIC_MUTATION]\nstage=quality_gate_coercion\nitem={item_name}\nold_value=price:{raw_price}\nnew_value=price:{price}", flush=True)
 
         # --- deduplicate ---
         key = (item_name.lower(), qty, price)
@@ -737,7 +745,7 @@ def extract_structured(ocr_text: str, doc_hint: str = "invoice") -> dict:
         "[LLM-EXTRACT] === extract_structured start doc_hint=%r ocr_chars=%d ===",
         doc_hint, len(ocr_text or ""),
     )
-    logger.info("[LLM-EXTRACT] raw_ocr_text_preview: %r", (ocr_text or "")[:400])
+    print(f"[TRACE] RAW_TEXT {ocr_text}", flush=True)
 
     if not (ocr_text or "").strip():
         logger.warning("[LLM-EXTRACT] Empty OCR text received; returning empty result")
@@ -760,7 +768,28 @@ def extract_structured(ocr_text: str, doc_hint: str = "invoice") -> dict:
         system_prompt, user_prompt = _build_prompt(ocr_text)
         raw_response = _call_provider(system_prompt, user_prompt)
         payload = _parse_llm_response(raw_response)
+        
+        # Log structured extraction output
+        print(f"[TRACE] EXTRACTED_ITEMS {json.dumps(payload.get('items', []))}", flush=True)
+        
+        # Task 3: Check if LLM extractor produced monitor with price 42000
+        has_monitor_42000 = False
+        if isinstance(payload, dict) and isinstance(payload.get("items"), list):
+            for it in payload.get("items", []):
+                if isinstance(it, dict) and str(it.get("item")).lower() == "monitor" and _safe_number(it.get("price")) == 42000:
+                    has_monitor_42000 = True
+                    break
+        if has_monitor_42000:
+            print("LLM Extractor produced monitor with price 42000!", flush=True)
+            print("Exact System Prompt:", system_prompt, flush=True)
+            print("Exact User Prompt:", user_prompt, flush=True)
+            print("Raw LLM Response:", raw_response, flush=True)
+            print("Parsed JSON:", json.dumps(payload, indent=2), flush=True)
+
         items = _validate_items(payload.get("items", []))
+        
+        # Log quality gate output
+        print(f"[TRACE] QUALITY_FILTERED_ITEMS {json.dumps(items)}", flush=True)
 
         logger.info(
             "[LLM-EXTRACT] valid_item_count=%d after validation",

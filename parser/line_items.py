@@ -136,7 +136,27 @@ def _split_candidate_lines(text: str) -> list[dict]:
     if re.search(r"(?i)\bitems?\s*:", cleaned_text):
         cleaned_text = re.split(r"(?i)\bitems?\s*:", cleaned_text, maxsplit=1)[1]
 
-    raw_lines = [line.strip() for line in cleaned_text.split("\n")]
+    raw_lines = []
+    for line in cleaned_text.split("\n"):
+        line = line.strip()
+        if not line:
+            raw_lines.append("")
+            continue
+        
+        split_pattern = r"(?i)\s*;\s*|\s*[;,]\s*(?:[| \-_]*)(?=(?:item|nem|wem)\b)"
+        if re.search(split_pattern, line):
+            parts = [p.strip() for p in re.split(split_pattern, line)]
+            valid_parts = []
+            for p in parts:
+                if not p:
+                    continue
+                if re.search(r"[A-Za-z0-9]", p):
+                    valid_parts.append(p)
+            if len(valid_parts) > 1:
+                raw_lines.extend(valid_parts)
+                continue
+        raw_lines.append(line)
+
     merged = _merge_broken_lines(raw_lines)
     candidates: list[dict] = []
 
@@ -431,6 +451,7 @@ def _apply_mathematical_consistency(parsed: dict) -> dict:
 
             # Swap if swapped is consistent, or if total is missing and it's an obvious swap (qty > 200 and price <= 200 and qty > price)
             if swapped_consistent or (total is None and qty > 200 and price <= 200 and qty > price):
+                print(f"[NUMERIC_MUTATION]\nstage=mathematical_swap\nitem={parsed.get('item')}\nold_value=qty:{qty}, price:{price}\nnew_value=qty:{price}, price:{qty}", flush=True)
                 parsed["qty"] = price
                 parsed["price"] = qty
                 parsed["swapped"] = True
@@ -442,6 +463,7 @@ def _apply_mathematical_consistency(parsed: dict) -> dict:
         subtotal = qty * price
         parsed["total"] = round(subtotal * (1 + tax / 100.0), 2)
         parsed["reconstructed"] = True
+        print(f"[NUMERIC_MUTATION]\nstage=mathematical_reconstruction\nitem={parsed.get('item')}\nold_value=total:None\nnew_value=total:{parsed['total']}", flush=True)
         if parsed["total"].is_integer():
             parsed["total"] = int(parsed["total"])
 
@@ -451,6 +473,7 @@ def _apply_mathematical_consistency(parsed: dict) -> dict:
         if abs(calc_qty - round(calc_qty)) < 0.01 and 0 < calc_qty <= 1000:
             parsed["qty"] = int(round(calc_qty))
             parsed["reconstructed"] = True
+            print(f"[NUMERIC_MUTATION]\nstage=mathematical_reconstruction\nitem={parsed.get('item')}\nold_value=qty:None\nnew_value=qty:{parsed['qty']}", flush=True)
         else:
             calc_qty = (total / (1 + tax / 100.0)) / price
             if abs(calc_qty - round(calc_qty)) < 0.01 and 0 < calc_qty <= 1000:
@@ -701,6 +724,46 @@ def extract_line_items_with_diagnostics(text: str, confidence: float | None = No
     skipped_rows: list[dict] = []
     normalized_text = _clean_ocr_text(text)
     candidate_lines = _split_candidate_lines(text)
+    
+    # Task: Print [TRACE_MONITOR_SOURCE] for rows containing monitor
+    for idx, entry in enumerate(candidate_lines):
+        raw_line = entry["raw"]
+        cleaned_line = entry["cleaned"]
+        if "monitor" in raw_line.lower():
+            # Get numeric matches
+            tokens = _numeric_matches(cleaned_line)
+            # Parse it to get selected qty, price, total
+            parsed = _parse_candidate_line(cleaned_line, confidence=confidence, header_indices={})
+            selected_qty = parsed.get("qty") if parsed else None
+            selected_price = parsed.get("price") if parsed else None
+            selected_total = parsed.get("total") if parsed else None
+            
+            print("[TRACE_MONITOR_SOURCE]", flush=True)
+            print(f"raw_candidate_row={raw_line}", flush=True)
+            print(f"numeric_tokens={tokens}", flush=True)
+            print(f"selected_qty={selected_qty}", flush=True)
+            print(f"selected_price={selected_price}", flush=True)
+            print(f"selected_total={selected_total}", flush=True)
+            
+            # Show 3 rows before and after in candidate list
+            before_rows = [c["raw"] for c in candidate_lines[max(0, idx-3):idx]]
+            after_rows = [c["raw"] for c in candidate_lines[idx+1:idx+4]]
+            print("Surrounding rows before:", before_rows, flush=True)
+            print("Surrounding rows after:", after_rows, flush=True)
+            
+            # Show 3 rows before and after in raw OCR text split
+            ocr_lines = [line.strip() for line in normalized_text.split("\n") if line.strip()]
+            ocr_idx = -1
+            for o_idx, o_line in enumerate(ocr_lines):
+                if raw_line in o_line or o_line in raw_line:
+                    ocr_idx = o_idx
+                    break
+            if ocr_idx != -1:
+                ocr_before = ocr_lines[max(0, ocr_idx-3):ocr_idx]
+                ocr_after = ocr_lines[ocr_idx+1:ocr_idx+4]
+                print("Surrounding raw OCR rows before:", ocr_before, flush=True)
+                print("Surrounding raw OCR rows after:", ocr_after, flush=True)
+
     trace = {
         "raw_ocr_text": text,
         "normalized_ocr_text": normalized_text,

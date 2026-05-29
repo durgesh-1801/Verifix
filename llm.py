@@ -237,8 +237,11 @@ def _group_items(line_items: list[dict]) -> dict[str, dict]:
         bucket["entries"].append(entry)
 
         if qty is not None:
+            old_qty = bucket["qty"]
             bucket["qty"]  += qty
             bucket["qty_values"].append(qty)
+            if old_qty > 0:
+                print(f"[NUMERIC_MUTATION]\nstage=grouping_aggregation\nitem={item_name}\nold_value=qty:{old_qty}\nnew_value=qty:{bucket['qty']}", flush=True)
         if price is not None:
             bucket["price_values"].append(price)
 
@@ -661,6 +664,46 @@ def compare_invoice_po(invoice_text: str, po_text: str) -> dict:
     logger.info("invoice_items count=%d",  len(invoice_items))
     logger.info("po_items count=%d",       len(po_items))
 
+    # Log extraction mode, fallback used, parser confidence score
+    print(f"extraction_mode: invoice={invoice_result.get('extraction_mode')}, po={po_result.get('extraction_mode')}", flush=True)
+    print(f"fallback_used: invoice={invoice_result.get('fallback_used')}, po={po_result.get('fallback_used')}", flush=True)
+    print(f"parser_confidence_score: invoice={invoice_parser.get('parser_confidence_score')}, po={po_parser.get('parser_confidence_score')}", flush=True)
+
+    # Task 4 & 5: Run deterministic parser side-by-side and compare outputs
+    from parser import build_structured_document
+    invoice_det_doc = build_structured_document(invoice_text)
+    det_invoice_items = invoice_det_doc.get("line_items", [])
+    po_det_doc = build_structured_document(po_text)
+    det_po_items = po_det_doc.get("line_items", [])
+    
+    import json
+    print(f"[TRACE] DETERMINISTIC_OUTPUT (invoice): {json.dumps(det_invoice_items)}", flush=True)
+    print(f"[TRACE] LLM_OUTPUT (invoice): {json.dumps(invoice_items)}", flush=True)
+    
+    print(f"[TRACE] DETERMINISTIC_OUTPUT (po): {json.dumps(det_po_items)}", flush=True)
+    print(f"[TRACE] LLM_OUTPUT (po): {json.dumps(po_items)}", flush=True)
+    
+    # Side-by-side comparison for deviation warning
+    has_deviation = False
+    det_inv_map = {it.get("item", "").lower(): it for it in det_invoice_items if it.get("item")}
+    llm_inv_map = {it.get("item", "").lower(): it for it in invoice_items if it.get("item")}
+    for name, llm_it in llm_inv_map.items():
+        if name in det_inv_map:
+            det_it = det_inv_map[name]
+            if llm_it.get("qty") != det_it.get("qty") or llm_it.get("price") != det_it.get("price"):
+                has_deviation = True
+                
+    det_po_map = {it.get("item", "").lower(): it for it in det_po_items if it.get("item")}
+    llm_po_map = {it.get("item", "").lower(): it for it in po_items if it.get("item")}
+    for name, llm_it in llm_po_map.items():
+        if name in det_po_map:
+            det_it = det_po_map[name]
+            if llm_it.get("qty") != det_it.get("qty") or llm_it.get("price") != det_it.get("price"):
+                has_deviation = True
+                
+    if has_deviation:
+        print("[WARNING] LLM_NUMERIC_DEVIATION", flush=True)
+
     if not invoice_items and not po_items:
         msg = "Could not parse structured invoice line items from OCR text."
         failure_path = (
@@ -708,8 +751,19 @@ def compare_invoice_po(invoice_text: str, po_text: str) -> dict:
         logger.warning("%s failure_path=llm.compare_invoice_po.partial_po_parse", warning)
 
     t_recon_start = time.perf_counter()
+    
+    # Log fuzzy input
+    print("[TRACE] FUZZY_INPUT", flush=True)
+    print(json.dumps(invoice_items), flush=True)
+    print(json.dumps(po_items), flush=True)
+    
     invoice_groups = _group_items(invoice_items)
     po_groups      = _group_items(po_items)
+
+    # Log comparison input
+    print("[TRACE] COMPARISON_INPUT", flush=True)
+    print(json.dumps(invoice_items), flush=True)
+    print(json.dumps(po_items), flush=True)
 
     discrepancies: list[dict] = []
     for item, bucket in invoice_groups.items():

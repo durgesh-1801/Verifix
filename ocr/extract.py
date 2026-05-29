@@ -939,7 +939,11 @@ def _run_paddle_ocr(image: Image.Image):
         base_kwargs["use_textline_orientation"] = True
 
     logger.info("PaddleOCR input image type before conversion: %s", type(image).__name__)
+    image = image.convert("RGB")
     paddle_image = np.array(image)
+    print("[PADDLE_INPUT]", flush=True)
+    print(f"shape={paddle_image.shape}", flush=True)
+    print(f"mode={image.mode}", flush=True)
     logger.info("PaddleOCR numpy image shape=%s dtype=%s", paddle_image.shape, paddle_image.dtype)
 
     # ------------------------------------------------------------------

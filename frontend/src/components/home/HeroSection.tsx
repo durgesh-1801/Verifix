@@ -1,5 +1,6 @@
 import { VerificationLedger, discrepanciesToRows } from './VerificationLedger'
 import type { ReactNode } from 'react'
+import { Link } from 'react-router-dom'
 
 function MetaItem({ icon, label }: { icon: ReactNode; label: string }) {
   return (
@@ -53,6 +54,18 @@ export function HeroSection({
             >
               Try Demo
             </button>
+            <Link
+              to="/login"
+              className="rounded-xl border border-gray-200 bg-white px-6 py-3 text-sm font-semibold text-[#1A1C2E] shadow-sm transition hover:border-gray-300 hover:bg-slate-50"
+            >
+              Login
+            </Link>
+            <Link
+              to="/signup"
+              className="rounded-xl bg-[#5B3DF5] px-6 py-3 text-sm font-semibold text-white shadow-lg shadow-[#5B3DF5]/25 transition hover:bg-[#4a32c8]"
+            >
+              Signup
+            </Link>
           </div>
           <div className="mt-10 flex flex-wrap gap-6 border-t border-gray-100 pt-8">
             <MetaItem

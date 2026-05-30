@@ -25,10 +25,7 @@ try:
 except ImportError:  # pragma: no cover - depends on runtime package availability
     cv2 = None
 
-try:
-    from paddleocr import PaddleOCR
-except ImportError:  # pragma: no cover - depends on runtime package availability
-    PaddleOCR = None
+PaddleOCR = None  # Lazy imported inside _get_paddle_ocr()
 
 _MIN_DIRECT_TEXT_CHARS = 80
 _PADDLE_OCR = None
@@ -41,17 +38,38 @@ _OCR_DEBUG = os.getenv("OCR_DEBUG", "0") == "1"
 # ---------------------------------------------------------------------------
 # Tesseract Setup
 # ---------------------------------------------------------------------------
-try:
-    _tesseract_cmd = os.getenv("TESSERACT_CMD", r"C:\Program Files\Tesseract-OCR\tesseract.exe")
-    pytesseract.pytesseract.tesseract_cmd = _tesseract_cmd
-    _tess_version = pytesseract.get_tesseract_version()
-    logger.info("[TESSERACT] initialized")
-    logger.info("[TESSERACT] version=%s, path=%s", _tess_version, _tesseract_cmd)
-except Exception as exc:
-    logger.warning("[TESSERACT] initialization failed: %s", exc)
+_TESSERACT_INITIALIZED = False
+_TESSERACT_LOCK = threading.Lock()
+
+
+def _initialize_tesseract() -> None:
+    """Thread-safe, lazy initialization for pytesseract."""
+    global _TESSERACT_INITIALIZED
+    if _TESSERACT_INITIALIZED:
+        return
+    with _TESSERACT_LOCK:
+        if _TESSERACT_INITIALIZED:
+            return
+        try:
+            import platform
+            if platform.system() == "Windows":
+                _tesseract_cmd = os.getenv("TESSERACT_CMD", r"C:\Program Files\Tesseract-OCR\tesseract.exe")
+                pytesseract.pytesseract.tesseract_cmd = _tesseract_cmd
+            else:
+                _tesseract_cmd = os.getenv("TESSERACT_CMD")
+                if _tesseract_cmd:
+                    pytesseract.pytesseract.tesseract_cmd = _tesseract_cmd
+            
+            _tess_version = pytesseract.get_tesseract_version()
+            logger.info("[TESSERACT] initialized successfully")
+            logger.info("[TESSERACT] version=%s, path=%s", _tess_version, pytesseract.pytesseract.tesseract_cmd)
+        except Exception as exc:
+            logger.warning("[TESSERACT] initialization check failed: %s. Pytesseract will run with default binary.", exc)
+        _TESSERACT_INITIALIZED = True
 
 
 def test_tesseract_ocr(image_path: str) -> None:
+    _initialize_tesseract()
     try:
         img = Image.open(image_path)
         text = pytesseract.image_to_string(img)
@@ -116,12 +134,12 @@ _PADDLE_LOCK = threading.Lock()
 
 
 def _get_paddle_ocr():
-    global _PADDLE_OCR, _PADDLE_OCR_INIT_FAILED
+    global _PADDLE_OCR, _PADDLE_OCR_INIT_FAILED, PaddleOCR
+    if os.getenv("ENABLE_PADDLEOCR", "1") == "0":
+        logger.info("[PADDLE] disabled via environment variable")
+        return None
     if _PADDLE_OCR is not None:
         return _PADDLE_OCR
-    if PaddleOCR is None:
-        logger.warning("PaddleOCR import unavailable; falling back to pytesseract OCR.")
-        return None
     if _PADDLE_OCR_INIT_FAILED:
         return None
     with _PADDLE_LOCK:
@@ -129,6 +147,17 @@ def _get_paddle_ocr():
         if _PADDLE_OCR is not None:
             return _PADDLE_OCR
         if _PADDLE_OCR_INIT_FAILED:
+            return None
+
+        if PaddleOCR is None:
+            try:
+                from paddleocr import PaddleOCR as LazyPaddleOCR
+                PaddleOCR = LazyPaddleOCR
+            except ImportError as exc:
+                logger.warning("PaddleOCR import unavailable; falling back to pytesseract OCR. error=%s", exc)
+                PaddleOCR = None
+
+        if PaddleOCR is None:
             return None
         init_signature = signature(PaddleOCR.__init__)
         base_kwargs = {"lang": "en"}
@@ -593,6 +622,7 @@ def _deskew_image(image: np.ndarray) -> np.ndarray:
 
 
 def _correct_orientation(image: np.ndarray, page_number: int, batch_id: str) -> np.ndarray:
+    _initialize_tesseract()
     try:
         # Convert to PIL Image for pytesseract
         pil_img = Image.fromarray(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
@@ -1065,6 +1095,7 @@ def _ocr_page_with_paddle(image: Image.Image) -> tuple[str, float]:
 
 
 def _ocr_page_with_tesseract(image: Image.Image) -> tuple[str, float]:
+    _initialize_tesseract()
     data = pytesseract.image_to_data(
         image,
         config="--oem 3 --psm 6",
@@ -1128,6 +1159,7 @@ def _extract_text_ocr(data: bytes) -> tuple[str, list[dict], str]:
                     engine_used = "paddleocr"
                 else:
                     logger.warning("[OCR-FALLBACK] PaddleOCR page text failed quality check (is_low_quality=%s); falling back to Tesseract.", is_low_quality)
+                    logger.info("[OCR-FALLBACK] using pytesseract")
                     page_text, confidence = _ocr_page_with_tesseract(processed)
                     engine = "pytesseract"
 

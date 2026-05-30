@@ -1,0 +1,20 @@
+# Keep Docker image lean
+venv/
+.venv/
+env/
+.git/
+.gitignore
+__pycache__/
+*.pyc
+.pytest_cache/
+.env
+node_modules/
+frontend/node_modules/
+frontend/dist/
+uploads/
+logs/
+benchmark_results/
+.paddleocr/
+.paddlex/
+*.egg-info/
+.gemini/
